@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pixel Office</title>
+<style>
+  :root {
+    --bg: #1b1d2a; --panel: #24273a; --text: #e6e6f0; --muted: #9a9cb5; --line: #363a52;
+    --accent: #f5c26b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 14px 20px; display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0; color: var(--accent); }
+  header span { color: var(--muted); font-size: 12px; }
+  #conn { margin-left: auto; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 8px;
+    border: 1px solid var(--line); background: #2b2f45; display: block; }
+  aside { display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .top { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who { font-size: 10px; padding: 1px 5px; border-radius: 4px; flex: none; font-weight: 700; }
+  .who.claude { background: #d97757; color: #1b1d2a; }
+  .who.codex { background: #e6e6f0; color: #111318; }
+  .badge { margin-left: auto; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #00000040; flex: none; }
+  .detail { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  .log { margin: 6px 0 0; padding: 0; list-style: none; font-size: 11px; color: var(--muted); }
+  .log li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { color: var(--muted); }
+  .legend { font-size: 12px; color: var(--muted); display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>▣ Pixel Office</h1>
+  <span>Claude Code(~/.claude) · Codex(~/.codex) 의 최근 30분 세션을 실시간으로 보여줍니다</span>
+  <span id="conn">연결 중…</span>
+</header>
+<main>
+  <canvas id="office" width="960" height="600"></canvas>
+  <aside>
+    <div id="list"></div>
+    <div class="card legend">
+      <div>⌨ 타이핑 — Edit/Write</div><div>📚 책장 — Read/Grep</div>
+      <div>🖥 서버랙 — Bash</div><div>🌐 브라우징 — Web</div>
+      <div>👥 회의 — Agent</div><div>💭 생각 중</div>
+      <div>❗ 승인 대기 (Claude는 추정)</div><div>☕ 휴식 — 턴 종료</div>
+    </div>
+  </aside>
+</main>
+<script src="office.js"></script>
+</body>
+</html>
