@@ -73,6 +73,11 @@ async function connect(t, url, cookie = '') {
       ws.send('42' + id + JSON.stringify(['chat', { room, text }]));
       return JSON.parse((await next(p => p.startsWith('43' + id + '['))).slice(('43' + id).length))[0];
     },
+    async request(name, body) { // ack 응답이 있는 이벤트
+      const id = ++ackId;
+      ws.send('42' + id + JSON.stringify([name, body]));
+      return JSON.parse((await next(p => p.startsWith('43' + id + '['))).slice(('43' + id).length))[0];
+    },
   };
 }
 
@@ -142,4 +147,64 @@ test('other-tab movement updates the local view and clears pending movement', ()
   assert.equal(context.dirtyMove, false);
   assert.equal(context.keys.size, 0);
   assert.equal(context.unread.lounge, 0);
+});
+
+test('chat reset and custom avatars', async t => {
+  const app = await startServer(t);
+  async function signup(username) {
+    const res = await fetch(app.url + '/api/signup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: 'test-password' }),
+    });
+    assert.equal(res.status, 200);
+    return res.headers.get('set-cookie').split(';')[0];
+  }
+  const aliceCookie = await signup('alice'), bobCookie = await signup('bob');
+  const alice = await connect(t, app.url, aliceCookie);
+  const bob = await connect(t, app.url, bobCookie);
+  const count = (room) => app.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE room = ?').get(room).n;
+
+  await t.test('clearing a room deletes only that room and leaves a notice for everyone', async () => {
+    assert.equal((await alice.chat('office', 'hello')).ok, true);
+    // 같은 연결의 이벤트는 순서대로 처리되므로 이동 직후 바로 보내도 된다 (채팅은 0.3초 간격 제한이 있어 잠깐 쉼)
+    await new Promise(r => setTimeout(r, 350));
+    alice.emit('move', { room: 'lounge', x: 14, y: 86, act: null });
+    assert.equal((await alice.chat('lounge', 'lounge msg')).ok, true);
+    alice.emit('move', { room: 'office', x: 180, y: 140, act: null });
+
+    assert.ok((await alice.request('clearChat', { room: 'lounge' })).error, 'must be in the room being cleared');
+    assert.equal((await alice.request('clearChat', { room: 'office' })).ok, true);
+    const ev = await bob.event('chatCleared');
+    assert.equal(ev.room, 'office');
+    assert.equal(ev.notice.name, '');
+    assert.match(ev.notice.text, /alice/);
+    assert.equal(count('office'), 1, 'only the notice remains');
+    assert.equal(count('lounge'), 1, 'other rooms are untouched');
+    assert.ok((await alice.request('clearChat', { room: 'office' })).error, 'rapid repeat is throttled');
+  });
+
+  await t.test('logged-out sockets cannot clear chat', async () => {
+    const guest = await connect(t, app.url);
+    assert.ok((await guest.request('clearChat', { room: 'office' })).error);
+  });
+
+  await t.test('avatars are validated, saved, and broadcast', async () => {
+    const rows = (r) => Array(12).fill(r);
+    const avatar = { palette: ['#ff0000', '#00ff00'], pants: '#112233', views: { down: rows('..0011....'), up: rows('..0000....'), side: rows('...1111...') } };
+    const post = (body, cookie) => fetch(app.url + '/api/avatar', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) });
+
+    const bad = structuredClone(avatar); bad.views.down[0] = '..0022....'; // palette has no index 2
+    assert.equal((await post({ avatar: bad }, aliceCookie)).status, 400);
+    assert.equal((await post({ avatar }, '')).status, 401);
+
+    assert.equal((await post({ avatar }, aliceCookie)).status, 200);
+    const ev = await bob.event('avatar');
+    assert.equal(ev.name, 'alice');
+    assert.deepEqual(ev.avatar.views.side, avatar.views.side);
+    const late = await connect(t, app.url, bobCookie);
+    assert.ok((await late.event('avatars')).alice, 'new connections receive saved avatars');
+
+    assert.equal((await post({ avatar: null }, aliceCookie)).status, 200);
+    assert.equal((await bob.event('avatar')).avatar, null);
+  });
 });

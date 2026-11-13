@@ -175,19 +175,45 @@
    * @param o { kind: 'claude'|'codex'|'human', dir: 'down'|'up'|'left'|'right', frame: 0~3, blink, type, sit }
    * @returns 오른쪽/정면 기준 캔버스 (왼쪽은 호출하는 쪽에서 반전)
    */
-  function paint(rows, pal, w, h) {
-    const cv = document.createElement('canvas');
-    cv.width = w * PX; cv.height = h * PX;
-    const g = cv.getContext('2d');
+  function paintInto(g, rows, pal, yOff = 0) {
     rows.forEach((row, y) => {
-      for (let x = 0; x < w; x++) {
+      for (let x = 0; x < row.length; x++) {
         const c = pal[row[x]];
         if (!c) continue;
         g.fillStyle = c;
-        g.fillRect(x * PX, y * PX, PX, PX);
+        g.fillRect(x * PX, (y + yOff) * PX, PX, PX);
       }
     });
+  }
+  function paint(rows, pal, w, h) {
+    const cv = document.createElement('canvas');
+    cv.width = w * PX; cv.height = h * PX;
+    paintInto(cv.getContext('2d'), rows, pal);
     return cv;
+  }
+
+  // ---------- 직접 그린 캐릭터 ----------
+  // custom = { palette: ['#rrggbb'...], pants, views: { down|up|side: 12줄 x 10칸, '.' 또는 '0'~'f' } }
+  // 사용자가 그린 머리·몸 12줄 아래에 바지 색으로 다리를 붙여서, 걷기·앉기 애니메이션은 기본 캐릭터와 같게 움직인다
+  function getCustom(cu, key, dir, frame, sit) {
+    let cv = cache.get(key);
+    if (cv) return cv;
+    cv = document.createElement('canvas');
+    cv.width = W * PX; cv.height = H * PX;
+    const g = cv.getContext('2d');
+    const pal = Object.fromEntries(cu.palette.map((c, i) => [i.toString(16), c]));
+    const legPal = { o: '#1a1b26', p: cu.pants, P: shade(cu.pants, -0.3), f: '#2a2230' };
+    const y0 = sit ? 2 : 0;
+    paintInto(g, cu.views[dir], pal, y0);
+    paintInto(g, sit ? SIT[dir] : LEGS[dir === 'side' ? 'side' : 'fb'][frame], legPal, y0 + 12);
+    cache.set(key, cv);
+    return cv;
+  }
+
+  // 기본 캐릭터의 머리·몸 12줄을 색(또는 null) 배열로: 편집기가 처음 그림으로 채워 넣을 때 쓴다
+  function baseRows(look, dir) {
+    const pal = palette(look, 'human', false);
+    return [...HEAD[dir], ...BODY[dir]].map((row) => [...row].map((ch) => pal[ch] || null));
   }
 
   const CLAWD_PAL = { o: '#5a2a1c', c: '#d97757', C: '#b35a3e', L: '#eb9c80', e: '#1a1b26' };
@@ -210,6 +236,8 @@
       cache.set(key, cv);
       return cv;
     }
+
+    if (look.custom && o.kind === 'human') return getCustom(look.custom, ['custom', look.customKey, dir, frame, sit].join('|'), dir, frame, sit);
 
     const type = !!o.type && dir === 'up';
     const key = [look.shirt, look.hair, look.skin, look.pants, o.kind, dir, frame, !!o.blink, type, sit].join('|');
@@ -234,5 +262,5 @@
   };
   const layout = (kind) => (kind === 'claude' ? LAYOUT.claude : LAYOUT.human);
 
-  window.Sprites = { W, H, PX, get, shade, mix, layout };
+  window.Sprites = { W, H, PX, get, shade, mix, layout, baseRows };
 })();

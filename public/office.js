@@ -106,6 +106,17 @@ const lookFor = (seed, shirts = SHIRTS) => {
   return { shirt: shirts[h % shirts.length], hair: HAIRS[(h >> 3) % HAIRS.length], skin: SKINS[(h >> 6) % 4], pants: PANTS[(h >> 9) % PANTS.length] };
 };
 
+// 직접 그린 캐릭터: 이름 -> avatar (서버가 접속 때 전부, 바뀔 때마다 하나씩 보내 줌)
+const avatars = new Map();
+function setAvatar(name, av) {
+  if (av) avatars.set(name, { ...av, _key: hash(JSON.stringify(av)) }); else avatars.delete(name);
+}
+// 사람 캐릭터 모습: 직접 그린 게 있으면 그것, 없으면 이름으로 정해지는 기본 모습
+function humanLook(name) {
+  const base = lookFor(name), av = avatars.get(name);
+  return av ? { ...base, custom: av, customKey: av._key } : base;
+}
+
 /** 에이전트: id -> { data, x, y, deskIndex, look } */
 const agents = new Map();
 let sessions = [];
@@ -456,7 +467,7 @@ function drawDoorLabels() {
 
 // 사람 → drawBody/drawOverlay가 그릴 수 있는 모양으로
 function personSprite(p, isMe) {
-  return { x: p.x, y: p.y, look: p.look, moving: p.moving, dir: p.dir || 'down', act: p.act || null, seed: hash(p.name) % 1000,
+  return { x: p.x, y: p.y, look: humanLook(p.name), moving: p.moving, dir: p.dir || 'down', act: p.act || null, seed: hash(p.name) % 1000,
     say: p.say, sayAt: p.sayAt, isMe, data: { title: p.name, state: 'human', agent: 'human', isSub: false } };
 }
 
@@ -651,7 +662,7 @@ function frame(t) {
   for (const p of people.values()) if (p.room === viewRoom && (!me || p.name !== me.name)) sprites.push(personSprite(p, false));
   if (me && me.placed && me.room === viewRoom) {
     const mine = people.get(me.name);
-    sprites.push(personSprite({ ...me, look: lookFor(me.name), say: mine?.say, sayAt: mine?.sayAt }, true));
+    sprites.push(personSprite({ ...me, say: mine?.say, sayAt: mine?.sayAt }, true));
   }
   sprites.sort((p, q) => p.y - q.y); // 아래쪽이 앞에 보이도록
   sprites.forEach((a) => drawBody(a, t));
@@ -773,10 +784,14 @@ function renderChat() {
   document.getElementById('chat-title').textContent = `# ${ROOM_BY_ID[viewRoom].name} 채팅`;
   const box = document.getElementById('chat-log');
   const msgs = chats[viewRoom];
+  // name이 빈 메시지는 서버가 남긴 알림(예: 채팅 초기화)
   box.innerHTML = msgs.length
-    ? msgs.map((m) => `<div class="msg${me && m.name === me.name ? ' mine' : ''}"><span class="t">${hhmm(m.t)}</span> <b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join('')
+    ? msgs.map((m) => (!m.name
+      ? `<div class="msg sys"><span class="t">${hhmm(m.t)}</span> 📢 ${esc(m.text)}</div>`
+      : `<div class="msg${me && m.name === me.name ? ' mine' : ''}"><span class="t">${hhmm(m.t)}</span> <b>${esc(m.name)}</b> ${esc(m.text)}</div>`)).join('')
     : '<div class="empty">아직 대화가 없어요</div>';
   box.scrollTop = box.scrollHeight;
+  document.getElementById('chat-clear').hidden = !me;
   for (const id of ['chat-input', 'chat-input-m']) {
     const input = document.getElementById(id);
     input.disabled = !me;
@@ -784,7 +799,24 @@ function renderChat() {
   }
   // 폰: 사무실 화면 위에 최근 대화 3줄을 겹쳐 보여준다 (아래 채팅창까지 스크롤하지 않아도 되게)
   document.getElementById('chat-peek').innerHTML = msgs.slice(-3)
-    .map((m) => `<div><b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join('');
+    .map((m) => (m.name ? `<div><b>${esc(m.name)}</b> ${esc(m.text)}</div>` : `<div>📢 ${esc(m.text)}</div>`)).join('');
+}
+
+// 채팅 초기화: 지금 방의 기록을 모두의 화면과 서버에서 지운다 (되돌릴 수 없으니 먼저 확인)
+document.getElementById('chat-clear').addEventListener('click', () => {
+  if (!me || !socket) return;
+  const room = ROOM_BY_ID[viewRoom].name;
+  if (!confirm(`${room} 채팅 기록을 모두 지울까요?\n모든 사람의 화면에서 지워지고 되돌릴 수 없어요.`)) return;
+  socket.timeout(5000).emit('clearChat', { room: viewRoom }, (err, res) => {
+    if (err) return flash('초기화 시간 초과');
+    if (res?.error) flash(res.error);
+  });
+});
+
+function onChatCleared({ room, notice }) {
+  chats[room] = notice ? [notice] : [];
+  for (const p of people.values()) if (p.room === room) p.say = null; // 머리 위 말풍선도 지움
+  if (room === viewRoom) renderChat();
 }
 
 function onChat(m) {
@@ -877,7 +909,24 @@ function connect() {
     renderChat();
   });
   socket.on('chat', onChat);
+  socket.on('chatCleared', onChatCleared);
+  socket.on('avatars', (map) => { avatars.clear(); for (const [n, av] of Object.entries(map || {})) setAvatar(n, av); });
+  socket.on('avatar', ({ name, avatar }) => setAvatar(name, avatar));
 }
+
+// ---------- 캐릭터 꾸미기 ----------
+document.getElementById('edit-avatar').addEventListener('click', () => {
+  if (!me) return;
+  keys.clear();
+  AvatarEditor.open({
+    base: lookFor(me.name),
+    current: avatars.get(me.name) || null,
+    onSave: async (avatar) => {
+      await api('/api/avatar', { avatar });
+      setAvatar(me.name, avatar); // 서버 알림을 기다리지 않고 내 화면에 바로 반영
+    },
+  });
+});
 
 (async () => {
   try {

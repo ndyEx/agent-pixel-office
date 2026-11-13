@@ -347,6 +347,8 @@ db.exec(`
     id TEXT PRIMARY KEY, room TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, t INTEGER NOT NULL);
   CREATE INDEX IF NOT EXISTS messages_room_t ON messages(room, t);
 `);
+// 직접 그린 도트 캐릭터(JSON). 예전 DB에는 칸이 없으므로 없을 때만 추가
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'avatar')) db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
 
 const q = {
   getUser: db.prepare('SELECT * FROM users WHERE key = ?'),
@@ -357,7 +359,32 @@ const q = {
   purgeSessions: db.prepare('DELETE FROM sessions WHERE exp <= ?'),
   addMessage: db.prepare('INSERT INTO messages (id, room, name, text, t) VALUES (@id, @room, @name, @text, @t)'),
   recent: db.prepare('SELECT * FROM (SELECT * FROM messages WHERE room = ? ORDER BY t DESC LIMIT 100) ORDER BY t'),
+  setAvatar: db.prepare('UPDATE users SET avatar = ? WHERE key = ?'),
+  clearRoom: db.prepare('DELETE FROM messages WHERE room = ?'),
+  allAvatars: db.prepare('SELECT name, avatar FROM users WHERE avatar IS NOT NULL'),
 };
+
+// ---------- 직접 그린 캐릭터 ----------
+// { v: 1, palette: ['#rrggbb' x 최대 16], pants: '#rrggbb', views: { down|up|side: 12줄 x 10칸 } }
+// 칸 글자: '.' = 빈칸, '0'~'f' = palette 번호. 머리·몸(12줄)만 그리고 다리는 바지 색으로 자동 생성
+const AV_ROWS = 12, AV_COLS = 10;
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+function cleanAvatar(a) {
+  if (a === null) return null;
+  if (!a || typeof a !== 'object' || !Array.isArray(a.palette) || !a.views) throw new Error('bad avatar');
+  const palette = a.palette.slice(0, 16).map(String);
+  if (!palette.length || !palette.every((c) => HEX_COLOR.test(c))) throw new Error('bad palette');
+  if (!HEX_COLOR.test(String(a.pants))) throw new Error('bad pants');
+  const cell = new RegExp(`^[.${'0123456789abcdef'.slice(0, palette.length)}]{${AV_COLS}}$`);
+  const views = {};
+  for (const dir of ['down', 'up', 'side']) {
+    const rows = a.views[dir];
+    if (!Array.isArray(rows) || rows.length !== AV_ROWS || !rows.every((r) => typeof r === 'string' && cell.test(r))) throw new Error(`bad view ${dir}`);
+    views[dir] = rows;
+  }
+  return { v: 1, palette: palette.map((c) => c.toLowerCase()), pants: String(a.pants).toLowerCase(), views };
+}
+const avatarMap = () => Object.fromEntries(q.allAvatars.all().map((r) => { try { return [r.name, JSON.parse(r.avatar)]; } catch { return null; } }).filter(Boolean));
 
 // 이전 버전의 JSON 파일(users.json, sessions.json)이 있으면 한 번만 옮겨 담는다
 (function migrateJson() {
@@ -420,6 +447,15 @@ const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'applic
 async function handleApi(req, res, pathname) {
   const user = userFromCookie(req.headers.cookie);
   if (pathname === '/api/me') return json(res, 200, { name: user ? user.name : null });
+  if (pathname === '/api/avatar' && req.method === 'POST') {
+    if (!user) return json(res, 401, { error: '로그인이 필요해요' });
+    if (!/^application\/json/.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'JSON만 가능' });
+    let avatar;
+    try { avatar = cleanAvatar((await readJson(req, 8192)).avatar); } catch { return json(res, 400, { error: '캐릭터 데이터가 올바르지 않아요' }); }
+    q.setAvatar.run(avatar ? JSON.stringify(avatar) : null, user.key);
+    io.emit('avatar', { name: user.name, avatar }); // 모두의 화면에 바로 반영
+    return json(res, 200, { ok: true });
+  }
   if (req.method !== 'POST') return json(res, 405, { error: 'POST만 가능' });
   // JSON 본문만 받는다(다른 사이트의 폼 전송으로 요청을 위조하는 것을 막음)
   if (!/^application\/json/.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'JSON만 가능' });
@@ -507,6 +543,7 @@ io.on('connection', (socket) => {
   const user = userFromCookie(socket.handshake.headers.cookie);
   socket.emit('agents', snapshot());
   socket.emit('history', history());
+  socket.emit('avatars', avatarMap());
   if (user) {
     socket.join(`session:${user.token}`);
     socket.join(`user:${user.key}`);
@@ -556,6 +593,21 @@ io.on('connection', (socket) => {
     const msg = { id: crypto.randomBytes(6).toString('hex'), room: p.room, name: p.name, text, t: Date.now() };
     q.addMessage.run(msg);
     io.emit('chat', msg); // 다른 방 사람도 받아서 탭에 '안 읽음' 숫자를 띄운다
+    ack({ ok: true });
+  });
+
+  // 채팅 초기화: 내가 있는 방의 기록을 DB에서 지우고, 누가 지웠는지 알림 한 줄을 남긴다.
+  // 알림은 name이 빈 문자열인 메시지(사용자 이름은 2글자 이상이라 사람이 흉내 낼 수 없음)
+  socket.on('clearChat', (m, ack) => {
+    if (typeof ack !== 'function') ack = () => {};
+    if (!authenticated()) return ack({ error: '로그인이 필요해요' });
+    const p = players.get(user.key);
+    if (m?.room !== p.room) return ack({ error: '다른 탭에서 방이 변경됐어요. 현재 방을 확인하고 다시 시도해주세요.' });
+    if (Date.now() - (p.lastClear || 0) < 3000) return ack({ error: '잠시 후 다시 시도해주세요' });
+    p.lastClear = Date.now();
+    const notice = { id: crypto.randomBytes(6).toString('hex'), room: p.room, name: '', text: `${p.name}님이 채팅을 초기화했어요`, t: Date.now() };
+    db.transaction(() => { q.clearRoom.run(p.room); q.addMessage.run(notice); })();
+    io.emit('chatCleared', { room: p.room, notice });
     ack({ ok: true });
   });
 
