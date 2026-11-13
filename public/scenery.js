@@ -111,13 +111,25 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
       R(g, rx + 3, 30 + l * 4, 1, 1, '#1a1c28'); R(g, rx + 5, 30 + l * 4, 1, 1, '#1a1c28');
     }
   }
-  function sofa(g, x, y, w, c) { // y = 등받이 윗변
+  function sofa(g, x, y, w, c, seats) { // y = 등받이 윗변
     shadow(g, x, y + 15, w + 2, 2);
     box(g, x, y, w, 7, shade(c, 0.06));
     box(g, x, y + 5, w, 10, c);
-    const n = Math.max(2, Math.round(w / 14));
+    const n = seats ?? Math.max(2, Math.round(w / 14)); // 방석 수 (1이면 1인용 안락의자)
     for (let i = 1; i < n; i++) R(g, x + Math.round((i * w) / n), y + 6, 1, 7, shade(c, -0.3));
     box(g, x - 2, y + 3, 4, 12, shade(c, -0.1)); box(g, x + w - 2, y + 3, 4, 12, shade(c, -0.1));
+  }
+  const LOUNGE_SOFA = '#8f5e9e';
+  // 아래쪽 소파에 앉은 캐릭터 위로 덧그릴 등받이 한 칸 (seatX: 좌석 가운데, y: 등받이 윗변)
+  function sofaBackPiece(g, seatX, y) { box(g, seatX - 8, y, 16, 7, shade(LOUNGE_SOFA, 0.06)); }
+  // 위를 보는 소파(뒷모습): 방석이 위, 등받이가 아래(화면 앞쪽). y = 방석 윗변
+  // 앉은 캐릭터의 허리는 office.js가 등받이 조각을 덧그려 가린다 (sofaBackPiece와 같은 색)
+  function sofaUp(g, x, y, w, c, seats) {
+    shadow(g, x, y + 15, w + 2, 2);
+    box(g, x, y, w, 9, c);
+    for (let i = 1; i < seats; i++) R(g, x + Math.round((i * w) / seats), y + 1, 1, 6, shade(c, -0.3));
+    box(g, x, y + 7, w, 7, shade(c, 0.06));
+    box(g, x - 2, y - 1, 4, 13, shade(c, -0.1)); box(g, x + w - 2, y - 1, 4, 13, shade(c, -0.1));
   }
   function table(g, x, y, w, h, c) {
     shadow(g, x + 1, y + h, w, 2);
@@ -259,11 +271,17 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
       wall(g, room.wall);
       bookshelf(g, 6, 26);
       rack(g, 206); rack(g, 220);
-      table(g, 100, 112, 40, 12, '#7a5636');
-      R(g, 104, 115, 7, 4, '#d8dce8'); R(g, 106, 114, 7, 4, '#f4f6fa'); // 회의 자료
-      R(g, 126, 115, 8, 5, '#2a2d42'); R(g, 127, 116, 6, 3, '#3c4160'); // 노트북
-      R(g, 14, 124, 50, 22, '#4a3f6a'); R(g, 15, 125, 48, 20, '#57497a'); // 휴게실 러그
-      sofa(g, 20, 129, 40, '#8f5e9e');
+      // 회의 테이블은 오른쪽으로 옮기고, 왼쪽 아래를 넓은 휴게 공간으로
+      table(g, 152, 112, 40, 12, '#7a5636');
+      R(g, 156, 115, 7, 4, '#d8dce8'); R(g, 158, 114, 7, 4, '#f4f6fa'); // 회의 자료
+      R(g, 178, 115, 8, 5, '#2a2d42'); R(g, 179, 116, 6, 3, '#3c4160'); // 노트북
+      // 휴게실: 4인용 소파 두 개가 가운데 테이블을 사이에 두고 마주 본다
+      sofa(g, 28, 106, 64, LOUNGE_SOFA, 4);                   // 위쪽: 정면을 보는 소파
+      table(g, 36, 123, 48, 8, '#6b4a2f');                    // 가운데 테이블
+      R(g, 42, 125, 3, 3, '#f4efe1'); R(g, 42, 125, 3, 1, '#6b4a2f'); R(g, 74, 126, 3, 3, '#f4efe1'); R(g, 74, 126, 3, 1, '#6b4a2f');
+      R(g, 54, 125, 10, 4, '#e8eaf0'); R(g, 56, 124, 8, 4, '#f4f6fa');            // 잡지
+      R(g, 67, 126, 4, 3, '#c94f4f'); R(g, 68, 125, 2, 1, '#e5c07b');            // 과자 봉지
+      sofaUp(g, 28, 134, 64, LOUNGE_SOFA, 4);                 // 아래쪽: 등을 보이는 소파
       shadow(g, 7, 136, 10, 2);
       box(g, 6, 118, 10, 18, '#c8ccd8'); R(g, 8, 121, 6, 4, '#2a2d42'); R(g, 9, 122, 2, 1, '#7bd88f');
       R(g, 10, 127, 2, 2, '#55596e'); R(g, 9, 131, 4, 3, '#f4efe1'); R(g, 9, 131, 4, 1, '#6b4a2f'); R(g, 8, 134, 6, 1, '#7a7f99');
@@ -360,8 +378,7 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
       DESKS.forEach((_, i) => desk(g, i, info.desks?.[i]?.st || null, t, !!info.desks?.[i]?.occupied));
       plant(g, 220, 116, t, 1);
       if (chance(2.5, dt)) emit(10.5 + Math.random(), 129, { room: roomId });
-      lights.push({ x: 11, y: 122, r: 4, c: '#7bd88f', a: 0.25 });
-    } else if (roomId === 'lounge') {
+      lights.push({ x: 11, y: 122, r: 4, c: '#7bd88f', a: 0.25 });    } else if (roomId === 'lounge') {
       winXs = [24, 174];
       // TV: 색이 흐르는 화면 + 주사선
       box(g, 92, 3, 56, 18, '#111318', { top: 0, bottom: 0 });
@@ -441,5 +458,5 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
     void roomId;
   }
 
-  return { sky, drawBase, drawOver, emit };
+  return { sky, drawBase, drawOver, emit, sofaBackPiece };
 };

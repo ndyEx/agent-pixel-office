@@ -34,11 +34,17 @@ for (let r = 0; r < 2; r++) for (let c = 0; c < 4; c++) DESKS.push({ x: 56 + c *
 const SPOTS = {
   reading:  { x: 22, y: 56 },
   terminal: { x: 218, y: 56 },
-  meeting:  { x: 120, y: 118 },
+  meeting:  { x: 172, y: 118 },
   idle:     { x: 30, y: 132 },
 };
 
-const SOFA_X = [28, 41, 54]; // 사무실 소파 좌석
+// 휴게실 좌석: 가운데 테이블을 사이에 두고 마주 보는 4인용 소파 두 개
+//   위쪽 소파는 정면(down)을 보고, 아래쪽 소파는 등을 보이며(up) 테이블 쪽을 본다
+const SEATS = [
+  ...[36, 52, 68, 84].map((x) => ({ x, y: 118, d: 'down' })),
+  ...[36, 52, 68, 84].map((x) => ({ x, y: 145, d: 'up', back: true })),
+];
+const LOUNGE_ZONE = { x: 12, y: 98, w: 96, h: 51 }; // 소파 주변 어디서든 멈추면 가장 가까운 빈자리에 앉음
 
 // ---------- 상호작용 자리 ----------
 // 내 캐릭터가 zone 안에서 잠깐 멈추면 자동으로 그 자리의 행동을 한다.
@@ -47,7 +53,7 @@ const SOFA_X = [28, 41, 54]; // 사무실 소파 좌석
 const ACT_SPOTS = {
   office: [
     ...DESKS.map((d, i) => ({ id: `desk${i}`, zone: { x: d.x + 10, y: d.y + 19, w: 18, h: 9 }, to: { x: d.x + 19, y: d.y + 24 }, d: 'up', a: 'type', p: 'sit', c: true })),
-    ...SOFA_X.map((x, i) => ({ id: `sofa${i}`, zone: { x: x - 6, y: 145, w: 13, h: 4 }, to: { x, y: 141 }, d: 'down', a: 'coffee', p: 'sit' })),
+    ...SEATS.map((s, i) => ({ id: `sofa${i}`, zone: LOUNGE_ZONE, to: { x: s.x, y: s.y }, d: s.d, a: 'coffee', p: 'sit', c: !!s.back })),
     { id: 'coffeebar', zone: { x: 18, y: 116, w: 7, h: 22 }, d: 'left', a: 'coffee' },
     { id: 'books', zone: { x: 6, y: 52, w: 32, h: 6 }, d: 'up', a: 'read' },
     { id: 'rack', zone: { x: 206, y: 54, w: 26, h: 6 }, d: 'up', a: 'type' },
@@ -71,7 +77,8 @@ const OBSTACLES = {
   office: [
     { x: 6, y: 26, w: 32, h: 26 }, { x: 206, y: 26, w: 26, h: 28 },
     ...DESKS.map((d) => ({ x: d.x, y: d.y + 8, w: 26, h: 9 })),
-    { x: 100, y: 110, w: 40, h: 15 }, { x: 20, y: 128, w: 40, h: 16 },
+    { x: 152, y: 110, w: 40, h: 15 },                                  // 회의 테이블
+    { x: 26, y: 104, w: 68, h: 45 },                                   // 마주 보는 소파+테이블
     { x: 6, y: 118, w: 10, h: 18 }, { x: 220, y: 112, w: 14, h: 26 },
   ],
   lounge: [
@@ -130,10 +137,11 @@ function targetFor(a, i) {
       return { x: s.x + Math.cos(ang) * 22, y: s.y + Math.sin(ang) * 10 };
     }
     if (st === 'idle') {
-      // 처음 세 명은 소파에 앉고, 나머지는 옆 공간에 겹치지 않게 지그재그로
+      // 쉬는 에이전트는 마주 보는 소파에 차례로 앉고, 다 차면 러그 오른쪽에 서서 쉰다
       const k = a.spotRank || 0;
-      if (k < 3) return { x: SOFA_X[k], y: 141 };
-      return { x: 72 + ((k - 3) % 5) * 14, y: 132 + ((k - 3) % 2) * 10 };
+      if (k < SEATS.length) return { x: SEATS[k].x, y: SEATS[k].y };
+      const j = k - SEATS.length;
+      return { x: 102 + (j % 3) * 9, y: 110 + (Math.floor(j / 3) % 4) * 9 };
     }
     return { x: s.x, y: s.y + jitter / 2 };
   }
@@ -151,14 +159,19 @@ const dirFrom = (dx, dy) => (Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : '
 function poseOf(a) {
   if (a.data.agent === 'human') {
     const x = a.act;
-    return x ? { dir: x.d, sit: x.p === 'sit', anim: x.a, chair: x.c } : { dir: a.dir || 'down' };
+    // c: 앞쪽에 등받이를 덧그림 (책상이면 의자, 휴게실 아래쪽 소파면 소파 등받이)
+    const back = x?.c ? (x.id?.startsWith('sofa') ? 'sofa' : 'chair') : null;
+    return x ? { dir: x.d, sit: x.p === 'sit', anim: x.a, back } : { dir: a.dir || 'down' };
   }
   const st = a.data.state;
-  if (st === 'idle') return { dir: 'down', sit: (a.spotRank || 0) < 3, anim: 'coffee' };
+  if (st === 'idle') {
+    const seat = SEATS[a.spotRank || 0];
+    return seat ? { dir: seat.d, sit: true, anim: 'coffee', back: seat.back ? 'sofa' : null } : { dir: 'down', anim: 'coffee' };
+  }
   if (st === 'reading') return { dir: 'up', anim: 'read' };
   if (st === 'terminal') return { dir: 'up', anim: 'type' };
   if (st === 'meeting') return { dir: dirFrom(SPOTS.meeting.x - a.x, SPOTS.meeting.y - 3 - a.y) };
-  if (a.deskIndex != null) return { dir: 'up', sit: true, chair: true, anim: st === 'typing' || st === 'working' ? 'type' : null };
+  if (a.deskIndex != null) return { dir: 'up', sit: true, back: 'chair', anim: st === 'typing' || st === 'working' ? 'type' : null };
   return { dir: 'down' };
 }
 
@@ -188,7 +201,9 @@ function drawBody(a, t) {
   else ctx.drawImage(spr, sx, sy, w, h);
 
   // 뒷모습으로 의자에 앉으면 등받이가 허리 아래를 가린다
-  if (pose.sit && pose.chair && dir === 'up') { // 발끝 기준. 키 작은 Claude 캐릭터는 등받이도 낮게
+  // 휴게실 아래쪽 소파: 등받이가 허리 아래를 가린다
+  if (pose.sit && pose.back === 'sofa' && dir === 'up') scenery.sofaBackPiece(ctx, a.x, 141);
+  if (pose.sit && pose.back === 'chair' && dir === 'up') { // 발끝 기준. 키 작은 Claude 캐릭터는 등받이도 낮게
     const cx = a.x * S, fy = a.y * S, bh = a.data.agent === 'claude' ? 3 : 5;
     ctx.fillStyle = '#1a1b26'; ctx.fillRect(cx - 4.5 * P, fy - (bh + 1) * P, 9 * P, bh * P);
     ctx.fillStyle = '#3c4160'; ctx.fillRect(cx - 3.5 * P, fy - bh * P, 7 * P, (bh - 2) * P);
@@ -269,7 +284,7 @@ function ensureFont(text) {
   document.fonts.load(`500 12px "Pretendard Variable"`, text).catch(() => {});
 }
 
-function drawOverlay(a, t) {
+function drawOverlay(a, t, tags) {
   const { k, f } = view;
   const st = a.data.state;
   const sx = a.x * S * k;
@@ -304,41 +319,107 @@ function drawOverlay(a, t) {
     L.fillStyle = '#1b1d2a'; L.fillText(text, sx, by + h / 2 + 0.5);
     L.globalAlpha = 1;
   }
-  // 이름표: 사람은 이름만, 에이전트는 [Claude|Codex 칩] 세션 이름 + 아래 줄에 칭호 · 프로젝트
-  const name = a.data.title.length > 14 ? a.data.title.slice(0, 13) + '…' : a.data.title;
+  // 이름표는 여기서 그리지 않고 모아 두었다가, 겹치지 않게 옆으로 펼친 뒤 한꺼번에 그린다
+  const name = shortName(a.data.title);
   ensureFont(name);
-  L.textBaseline = 'middle';
+  L.font = font(10);
   const kind = KIND_CHIP[a.data.agent];
-  // 소파에 나란히 앉은 에이전트는 이름표가 겹치므로 한 칸 건너 머리 위(말풍선 위)로 올린다
-  const up = kind && st === 'idle' && !a.moving && (a.spotRank || 0) % 2 === 1;
-  const h = 15 * f, block = h + (kind ? 13.5 * f : 0);
-  // 화면 맨 아래에서는 이름표가 잘리지 않게 위로 붙인다
-  const y0 = up ? top - 30 * f - block : Math.min(feet + 2 * f, canvas.clientHeight - block - 3);
-  L.font = font(11); const nameW = L.measureText(name).width;
-  L.font = font(9, true); const chipW = kind ? L.measureText(kind.label).width + 8 * f : 0;
-  const w = nameW + 10 * f + (kind ? chipW + 4 * f : 0), x0 = sx - w / 2;
-  L.fillStyle = a.isMe ? '#f5c26be8' : '#14151fd0';
-  L.beginPath(); L.roundRect(x0, y0, w, h, 4); L.fill();
-  if (kind) { // 왼쪽 칩
-    L.fillStyle = a.band || kind.bg;
-    L.beginPath(); L.roundRect(x0 + 2 * f, y0 + 2 * f, chipW, h - 4 * f, 3); L.fill();
-    L.fillStyle = kind.fg; L.textAlign = 'center';
-    L.fillText(kind.label, x0 + 2 * f + chipW / 2, y0 + h / 2 + 0.5);
+  const dot = kind ? 7 * f : 0; // 종류 색 점 (Claude는 세션 머리띠 색, Codex는 흰색)
+  const w = L.measureText(name).width + 10 * f + (dot ? dot + 4 * f : 0), h = 14 * f;
+  tags.push({ a, name, kind, dot, w, h, cx: sx, x: sx, feet, top,
+    y: Math.min(feet + 2 * f, canvas.clientHeight - h - 3) }); // 화면 맨 아래에서는 잘리지 않게
+}
+
+// 같은 높이(한 줄)에 있는 이름표끼리 겹치면 왼쪽부터 차례로 옆으로 밀고, 줄 전체를 원래 중심으로 되돌린다.
+// 위아래로는 움직이지 않으니 캐릭터 바로 밑에 그대로 붙어 있다.
+function layoutTags(tags) {
+  const gap = 3, W = canvas.clientWidth;
+  const rows = [];
+  for (const tg of [...tags].sort((p, q) => p.y - q.y)) {
+    const row = rows.find((r) => Math.abs(r[0].y - tg.y) < tg.h);
+    if (row) row.push(tg); else rows.push([tg]);
   }
-  L.font = font(11); L.textAlign = 'left';
-  L.fillStyle = a.isMe ? '#1b1d2a' : a.data.agent === 'human' ? '#ffffff' : STATE_INFO[st]?.color || '#fff';
-  L.fillText(name, x0 + (kind ? chipW + 6 * f : 5 * f), y0 + h / 2 + 0.5);
-  // 둘째 줄: 칭호 · 프로젝트
-  if (kind) {
-    const sub = [titleFor(a.data), a.data.project].filter(Boolean).join(' · ');
-    const line = sub.length > 26 ? sub.slice(0, 25) + '…' : sub;
-    ensureFont(line);
-    L.font = font(9); L.textAlign = 'center';
-    const w2 = L.measureText(line).width + 8 * f, h2 = 12 * f, y2 = y0 + h + 1.5 * f;
-    L.fillStyle = '#14151fa8'; L.beginPath(); L.roundRect(sx - w2 / 2, y2, w2, h2, 3); L.fill();
-    L.fillStyle = '#c0caf5'; L.fillText(line, sx, y2 + h2 / 2 + 0.5);
+  for (const row of rows) {
+    row.sort((p, q) => p.cx - q.cx);
+    for (let i = 1; i < row.length; i++) {
+      const prev = row[i - 1], cur = row[i];
+      cur.x = Math.max(cur.cx, prev.x + prev.w / 2 + gap + cur.w / 2);
+    }
+    const drift = row.reduce((s, tg) => s + (tg.x - tg.cx), 0) / row.length;
+    for (const tg of row) tg.x = Math.min(W - tg.w / 2 - 2, Math.max(tg.w / 2 + 2, tg.x - drift));
   }
 }
+
+function drawTags(tags) {
+  const f = view.f;
+  for (const tg of tags) {
+    const { a, x, y, w, h } = tg, x0 = x - w / 2, st = a.data.state;
+    // 많이 밀려난 이름표는 캐릭터 발밑과 가는 선으로 잇는다
+    if (Math.abs(x - tg.cx) > w * 0.35) {
+      L.strokeStyle = '#ffffff55'; L.lineWidth = 1;
+      L.beginPath(); L.moveTo(tg.cx, tg.feet); L.lineTo(x, y); L.stroke();
+    }
+    L.fillStyle = a.isMe ? '#f5c26be8' : '#14151fd0';
+    L.beginPath(); L.roundRect(x0, y, w, h, h / 2); L.fill();
+    if (tg.dot) {
+      L.fillStyle = a.band || tg.kind.bg;
+      L.beginPath(); L.arc(x0 + 5 * f + tg.dot / 2, y + h / 2, tg.dot / 2, 0, Math.PI * 2); L.fill();
+    }
+    L.font = font(10); L.textAlign = 'left'; L.textBaseline = 'middle';
+    L.fillStyle = a.isMe ? '#1b1d2a' : a.data.agent === 'human' ? '#ffffff' : STATE_INFO[st]?.color || '#fff';
+    L.fillText(tg.name, x0 + 5 * f + (tg.dot ? tg.dot + 4 * f : 0), y + h / 2 + 0.5);
+  }
+}
+
+// ---------- 마우스를 올리거나 탭하면 자세한 카드 ----------
+const pointer = { x: -1, y: -1, pinned: false };
+canvas.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') { pointer.x = e.offsetX; pointer.y = e.offsetY; } });
+canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && !pointer.pinned) pointer.x = pointer.y = -1; });
+canvas.addEventListener('pointerdown', (e) => { // 터치: 탭한 곳의 캐릭터 카드를 띄우고, 빈 곳을 탭하면 닫힘
+  if (e.pointerType !== 'mouse') { pointer.x = e.offsetX; pointer.y = e.offsetY; pointer.pinned = true; }
+});
+
+function hitTest(tags) {
+  if (pointer.x < 0) return null;
+  const { k } = view, px = pointer.x, py = pointer.y;
+  // 위에 그려진(앞쪽) 캐릭터부터: 몸 영역 또는 이름표
+  for (let i = tags.length - 1; i >= 0; i--) {
+    const tg = tags[i], half = 7 * S * k;
+    const onBody = px > tg.cx - half && px < tg.cx + half && py > tg.top && py < tg.feet + 2;
+    const onTag = px > tg.x - tg.w / 2 && px < tg.x + tg.w / 2 && py > tg.y && py < tg.y + tg.h;
+    if (onBody || onTag) return tg;
+  }
+  return null;
+}
+
+function drawCard(tags) {
+  const tg = hitTest(tags);
+  canvas.style.cursor = tg ? 'pointer' : '';
+  if (!tg) { if (pointer.pinned) { pointer.pinned = false; pointer.x = pointer.y = -1; } return; }
+  const { a } = tg, d = a.data, f = view.f;
+  const lines = [{ text: d.title, font: font(12, true), color: '#ffffff' }];
+  if (tg.kind) {
+    const info = STATE_INFO[d.state] || STATE_INFO.working;
+    lines.push({ text: `${tg.kind.label} · ${titleFor(d)}`, font: font(10), color: a.band || '#c0caf5' });
+    lines.push({ text: `● ${info.label}`, font: font(10, true), color: info.color });
+    if (d.detail) lines.push({ text: d.detail.length > 34 ? d.detail.slice(0, 33) + '…' : d.detail, font: font(10), color: '#9a9cb5' });
+  } else {
+    lines.push({ text: a.isMe ? '나' : '사람', font: font(10), color: '#c0caf5' });
+  }
+  let w = 0;
+  for (const ln of lines) { ensureFont(ln.text); L.font = ln.font; w = Math.max(w, L.measureText(ln.text).width); }
+  const pad = 8 * f, lh = 15 * f, cw = w + pad * 2, ch = lines.length * lh + pad * 1.4;
+  let cx = tg.cx - cw / 2, cy = tg.top - ch - 10 * f;
+  if (cy < 4) cy = tg.feet + 22 * f;                       // 위가 모자라면 발밑으로
+  cx = Math.min(canvas.clientWidth - cw - 4, Math.max(4, cx));
+  L.fillStyle = '#14151ff2'; L.strokeStyle = a.band || (tg.kind ? tg.kind.bg : '#f5c26b'); L.lineWidth = 1.5;
+  L.beginPath(); L.roundRect(cx, cy, cw, ch, 8); L.fill(); L.stroke();
+  L.textAlign = 'left'; L.textBaseline = 'middle';
+  lines.forEach((ln, i) => { L.font = ln.font; L.fillStyle = ln.color; L.fillText(ln.text, cx + pad, cy + pad * 0.7 + lh * i + lh / 2); });
+}
+
+const NAME_MAX = 8;
+const shortName = (s = '') => { const c = [...s.trim()]; return c.length > NAME_MAX ? c.slice(0, NAME_MAX - 1).join('') + '…' : c.join(''); };
 
 // 에이전트 종류 칩 (Claude 칩은 그 세션 머리띠 색으로 칠해 화면 속 캐릭터와 짝을 맞춘다)
 const KIND_CHIP = {
@@ -386,7 +467,8 @@ const typingInField = (e) => /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
 addEventListener('keydown', (e) => {
   if (typingInField(e)) { if (e.key === 'Escape') e.target.blur(); return; }
   if (KEYMAP[e.key] && me) { keys.add(e.key); e.preventDefault(); }
-  if (e.key === 'Enter' && me) { document.getElementById('chat-input').focus(); e.preventDefault(); }
+  // Enter: 지금 화면에 보이는 채팅 입력칸으로 (좁은 화면이면 사무실 화면 바로 아래 입력칸), 페이지는 스크롤하지 않음
+  if (e.key === 'Enter' && me) { visibleChatInput().focus({ preventScroll: true }); e.preventDefault(); }
 });
 addEventListener('keyup', (e) => keys.delete(e.key));
 addEventListener('blur', () => { keys.clear(); resetJoy(); });
@@ -492,7 +574,11 @@ function spotTaken(id) {
 }
 
 function startAct() {
-  const spot = (ACT_SPOTS[me.room] || []).find((s) => inZone(me.x, me.y, s.zone) && !spotTaken(s.id));
+  // 여러 자리가 한 구역을 같이 쓰면(휴게실 소파) 가장 가까운 빈자리를 고른다
+  const dist = (s) => (s.to ? Math.hypot(s.to.x - me.x, s.to.y - me.y) : 0);
+  const spot = (ACT_SPOTS[me.room] || [])
+    .filter((s) => inZone(me.x, me.y, s.zone) && !spotTaken(s.id))
+    .sort((p, q) => dist(p) - dist(q))[0];
   if (!spot) return;
   me.act = { id: spot.id, a: spot.a || null, p: spot.p || 'stand', d: spot.d, c: !!spot.c, sx: me.x, sy: me.y };
   if (spot.to) { me.x = spot.to.x; me.y = spot.to.y; }
@@ -572,7 +658,11 @@ function frame(t) {
   scenery.drawOver(ctx, viewRoom, dt, sk); // 김·먼지, 밤 색조, 빛번짐, 비네팅
   fitLabels();
   drawDoorLabels();
-  sprites.forEach((a) => drawOverlay(a, t));
+  const tags = [];
+  sprites.forEach((a) => drawOverlay(a, t, tags)); // 상태·채팅 말풍선
+  layoutTags(tags);                                 // 겹치는 이름표는 옆으로
+  drawTags(tags);
+  drawCard(tags);                                   // 마우스를 올린(탭한) 캐릭터의 자세한 카드
 
   if (viewRoom === 'office' && !list.length) {
     const { k, f } = view, cx = canvas.clientWidth / 2, cy = 100 * S * k;
@@ -687,9 +777,14 @@ function renderChat() {
     ? msgs.map((m) => `<div class="msg${me && m.name === me.name ? ' mine' : ''}"><span class="t">${hhmm(m.t)}</span> <b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join('')
     : '<div class="empty">아직 대화가 없어요</div>';
   box.scrollTop = box.scrollHeight;
-  const input = document.getElementById('chat-input');
-  input.disabled = !me;
-  input.placeholder = me ? `${ROOM_BY_ID[viewRoom].name}에 메시지 보내기 (Enter)` : '로그인하면 채팅할 수 있어요';
+  for (const id of ['chat-input', 'chat-input-m']) {
+    const input = document.getElementById(id);
+    input.disabled = !me;
+    input.placeholder = me ? `${ROOM_BY_ID[viewRoom].name}에 메시지 보내기${id === 'chat-input' ? ' (Enter)' : ''}` : '로그인하면 채팅할 수 있어요';
+  }
+  // 폰: 사무실 화면 위에 최근 대화 3줄을 겹쳐 보여준다 (아래 채팅창까지 스크롤하지 않아도 되게)
+  document.getElementById('chat-peek').innerHTML = msgs.slice(-3)
+    .map((m) => `<div><b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join('');
 }
 
 function onChat(m) {
@@ -700,9 +795,16 @@ function onChat(m) {
   else { unread[m.room]++; renderTabs(); }
 }
 
-document.getElementById('chat-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const input = document.getElementById('chat-input');
+// 채팅 입력칸은 두 곳: 오른쪽(아래) 채팅창, 그리고 폰에서만 보이는 사무실 화면 바로 아래
+for (const [formId, inputId] of [['chat-form', 'chat-input'], ['chat-form-m', 'chat-input-m']])
+  document.getElementById(formId).addEventListener('submit', (e) => { e.preventDefault(); sendChat(document.getElementById(inputId)); });
+
+function visibleChatInput() {
+  const m = document.getElementById('chat-input-m');
+  return m.offsetParent ? m : document.getElementById('chat-input'); // display:none이면 offsetParent가 null
+}
+
+function sendChat(input) {
   const text = input.value.trim();
   if (!text || !me || !socket) return;
   // 서버가 저장·전송을 마치면 ack 콜백으로 결과를 알려준다
@@ -711,7 +813,7 @@ document.getElementById('chat-form').addEventListener('submit', async (e) => {
     if (res?.error) return flash(res.error);
     input.value = '';
   });
-});
+}
 
 // ---------- 로그인 ----------
 async function api(path, body) {

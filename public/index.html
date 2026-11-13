@@ -60,15 +60,17 @@
   #labels { position: absolute; top: 1px; left: 1px; width: calc(100% - 2px); height: calc(100% - 2px);
     border: 0; border-radius: 7px; background: none;
     image-rendering: auto; pointer-events: none; }
-  /* 터치 기기용 가상 조이스틱: 캔버스 왼쪽 아래에 겹쳐 띄움 */
-  #joystick { position: absolute; left: 14px; bottom: 14px; width: 112px; height: 112px; border-radius: 50%;
-    background: #00000055; border: 2px solid #ffffff40; touch-action: none; user-select: none; -webkit-user-select: none; }
+  /* 사무실 화면 아래 조작줄: 왼쪽 조이스틱(터치 기기), 오른쪽 채팅 입력칸(폰 화면). 둘 다 숨으면 높이 0 */
+  .controls { display: flex; align-items: center; gap: 12px; }
+  #joystick { position: relative; flex: none; width: 96px; height: 96px; border-radius: 50%;
+    background: var(--panel); border: 2px solid var(--line); touch-action: none; user-select: none; -webkit-user-select: none; }
   #joystick[hidden] { display: none; }
-  #joy-knob { position: absolute; left: 50%; top: 50%; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%;
+  #joy-knob { position: absolute; left: 50%; top: 50%; width: 42px; height: 42px; margin: -21px 0 0 -21px; border-radius: 50%;
     background: #f5c26bd0; box-shadow: 0 2px 6px #0008; pointer-events: none; }
+  #joystick.active { border-color: var(--accent); }
   #joystick.active #joy-knob { background: var(--accent); }
   @media (max-width: 600px) {
-    #joystick { width: 84px; height: 84px; left: 8px; bottom: 8px; background: #00000040; }
+    #joystick { width: 84px; height: 84px; }
     #joy-knob { width: 36px; height: 36px; margin: -18px 0 0 -18px; }
   }
   .touch .key-hint { display: none; }
@@ -110,6 +112,17 @@
   .msg .t { color: var(--muted); font-size: 10px; }
   .msg b { color: #7aa2f7; }
   .msg.mine b { color: var(--accent); }
+  /* 폰 전용 채팅: 사무실 화면 아래 입력칸 + 화면 위 최근 대화 3줄 (PC에서는 숨김) */
+  #chat-form-m, #chat-peek { display: none; }
+  @media (max-width: 900px) {
+    #chat-form-m { display: flex; gap: 6px; flex: 1; min-width: 0; }
+    #chat-form-m input { flex: 1; width: auto; font-size: 16px; } /* 16px 미만이면 iOS가 화면을 확대함 */
+    #chat-peek:not(:empty) { display: flex; flex-direction: column; gap: 2px; position: absolute; top: 6px; left: 6px;
+      max-width: 62%; pointer-events: none; font-size: 11px; line-height: 1.35; }
+    #chat-peek div { background: #14151fb8; color: #e6e6f0; padding: 2px 7px; border-radius: 8px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #chat-peek b { color: var(--accent); font-weight: 700; }
+  }
   #chat-form { display: flex; gap: 6px; margin-top: 6px; }
   #chat-input { flex: 1; }
 </style>
@@ -137,9 +150,14 @@
     <div class="canvas-wrap">
       <canvas id="office" width="960" height="600" tabindex="0"></canvas>
       <canvas id="labels" aria-hidden="true"></canvas>
-      <div id="joystick" hidden aria-label="이동 조이스틱"><div id="joy-knob"></div></div>
+      <div id="chat-peek" aria-hidden="true"></div>
     </div>
-    <div class="hint"><span class="key-hint">로그인하면 방향키로 내 캐릭터를 움직일 수 있어요 · 책상·소파·커피머신·자판기·탁구대 앞에 멈추면 자동으로 앉거나 마셔요 · 옆 벽의 문으로 다른 방에 가요 · Enter 채팅 / Esc 입력 끝내기</span><span class="touch-hint">로그인하면 왼쪽 아래 조이스틱으로 움직일 수 있어요 · 책상·소파 앞에 멈추면 자동으로 앉아요 · 옆 벽의 문으로 다른 방에 가요</span></div>
+    <!-- 화면 아래 조작줄: 조이스틱(터치 기기) + 채팅 입력칸(폰 화면). 사무실 화면을 가리지 않게 밖에 둔다 -->
+    <div class="controls">
+      <div id="joystick" hidden aria-label="이동 조이스틱"><div id="joy-knob"></div></div>
+      <form id="chat-form-m"><input id="chat-input-m" maxlength="200" autocomplete="off" enterkeyhint="send" /><button class="btn" type="submit">전송</button></form>
+    </div>
+    <div class="hint"><span class="key-hint">로그인하면 방향키로 내 캐릭터를 움직일 수 있어요 · 책상·소파·커피머신·자판기·탁구대 앞에 멈추면 자동으로 앉거나 마셔요 · 옆 벽의 문으로 다른 방에 가요 · Enter 채팅 / Esc 입력 끝내기</span><span class="touch-hint">로그인하면 화면 아래 조이스틱으로 움직일 수 있어요 · 책상·소파 앞에 멈추면 자동으로 앉아요 · 옆 벽의 문으로 다른 방에 가요</span></div>
   </div>
   <aside>
     <div class="card chat">
