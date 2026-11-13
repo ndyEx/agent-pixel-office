@@ -1,11 +1,13 @@
 // Pixel Office — Claude Code 세션 기록(JSONL)을 감시해서 상태를 브라우저로 스트리밍하는 서버
-// 의존성 없음: node server.js 로 실행
+// 실시간 전송은 socket.io, 계정·로그인·채팅 저장은 SQLite(data/office.db)
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 4321;
+const HOST = process.env.HOST || '127.0.0.1';
 const ROOT = path.join(os.homedir(), '.claude', 'projects');
 const CODEX_ROOT = process.env.CODEX_SESSIONS || path.join(os.homedir(), '.codex', 'sessions');
 const ACTIVE_WINDOW_MS = 30 * 60 * 1000; // 최근 30분 내 수정된 세션만 표시
@@ -13,7 +15,7 @@ const INITIAL_TAIL_BYTES = 256 * 1024;   // 처음 발견한 파일은 끝부분
 
 /** file path -> session state */
 const sessions = new Map();
-const clients = new Set();
+let io; // socket.io 서버 (아래에서 생성)
 
 function classifyTool(name = '') {
   if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name)) return 'typing';
@@ -64,6 +66,8 @@ function pushLog(s, text) {
 function applyEntry(s, e, live) {
   const ts = e.timestamp ? Date.parse(e.timestamp) : Date.now();
   if (e.type === 'agent-name' && e.agentName) s.title = e.agentName;
+  // 프로젝트 이름: 폴더 이름(경로의 /를 -로 바꾼 것)은 어디서 끊어야 할지 모르므로, 기록에 남은 실제 작업 폴더(cwd)를 쓴다
+  if (typeof e.cwd === 'string' && e.cwd) s.project = path.basename(e.cwd.replace(/[\\/]+$/, '')).slice(-32);
   if (e.type === 'summary' && e.summary && s.title.length <= 8) s.title = e.summary;
   // 포크·사이드 채팅은 원래 대화 기록을 그대로 복사해 둔다(sessionId가 원본 것).
   // 복사된 기록은 이 세션이 한 일이 아니므로 상태 계산에서 뺀다.
@@ -195,12 +199,46 @@ function applyCodex(s, e, live) {
   }
 }
 
+// 처음 발견한 파일은 끝부분만 읽으므로, 앞부분의 도구 사용 횟수는 따로 세어 둔다 (칭호가 서버 재시작에 흔들리지 않게)
+const HEAD_COUNT_LIMIT = 64 * 1024 * 1024;
+function countHeadTools(file, end, s) {
+  const limit = Math.min(end, HEAD_COUNT_LIMIT);
+  const fd = fs.openSync(file, 'r');
+  const chunk = Buffer.alloc(4 * 1024 * 1024);
+  let pos = 0, rest = '', n = 0;
+  const countLine = (line) => {
+    if (s.agent === 'codex') {
+      if (!line.includes('_call"')) return;
+      try { const e = JSON.parse(line); if (e.type === 'response_item' && /call$/.test(e.payload?.type || '')) n++; } catch { /* 잘린 줄 */ }
+    } else {
+      if (!line.includes('"tool_use"')) return;
+      try {
+        const e = JSON.parse(line);
+        if (e.type !== 'assistant' || (!s.isSub && e.sessionId && e.sessionId !== s.ownId)) return; // 복사된 기록 제외
+        n += (Array.isArray(e.message?.content) ? e.message.content : []).filter((c) => c.type === 'tool_use').length;
+      } catch { /* 잘린 줄 */ }
+    }
+  };
+  try {
+    while (pos < limit) {
+      const len = fs.readSync(fd, chunk, 0, Math.min(chunk.length, limit - pos), pos);
+      if (!len) break;
+      pos += len;
+      const lines = (rest + chunk.toString('utf8', 0, len)).split('\n');
+      rest = lines.pop();
+      lines.forEach(countLine);
+    }
+  } finally { fs.closeSync(fd); }
+  return n;
+}
+
 function readNew(file, s, live) {
   let stat;
   try { stat = fs.statSync(file); } catch { return false; }
   if (stat.size < s.offset) { s.offset = 0; s.partial = ''; } // 파일이 잘렸으면 처음부터
   if (stat.size === s.offset) return false;
   const start = s.offset === 0 && !live ? Math.max(0, stat.size - INITIAL_TAIL_BYTES) : s.offset;
+  if (s.offset === 0 && !live && start > 0) s.tools += countHeadTools(file, start, s);
   const fd = fs.openSync(file, 'r');
   const buf = Buffer.alloc(stat.size - start);
   fs.readSync(fd, buf, 0, buf.length, start);
@@ -287,19 +325,138 @@ function tick() {
   const data = JSON.stringify(snapshot());
   if (data !== lastSent) {
     lastSent = data;
-    for (const res of clients) res.write(`data: ${data}\n\n`);
+    io.emit('agents', JSON.parse(data));
   }
 }
 
+// ---------- 저장소: SQLite ----------
+// 계정·로그인 토큰·채팅을 data/office.db 한 파일에 저장. 비밀번호는 scrypt 해시로만 보관한다.
+const Database = require('better-sqlite3');
+const { Server } = require('socket.io');
+
+const DATA_DIR = path.join(__dirname, 'data');
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const db = new Database(path.join(DATA_DIR, 'office.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    key TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, hash TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY, key TEXT NOT NULL REFERENCES users(key), exp INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY, room TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, t INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS messages_room_t ON messages(room, t);
+`);
+
+const q = {
+  getUser: db.prepare('SELECT * FROM users WHERE key = ?'),
+  addUser: db.prepare('INSERT INTO users (key, name, salt, hash, created) VALUES (?, ?, ?, ?, ?)'),
+  getSession: db.prepare('SELECT s.key, u.name FROM sessions s JOIN users u ON u.key = s.key WHERE s.token = ? AND s.exp > ?'),
+  addSession: db.prepare('INSERT OR IGNORE INTO sessions (token, key, exp) VALUES (?, ?, ?)'),
+  delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
+  purgeSessions: db.prepare('DELETE FROM sessions WHERE exp <= ?'),
+  addMessage: db.prepare('INSERT INTO messages (id, room, name, text, t) VALUES (@id, @room, @name, @text, @t)'),
+  recent: db.prepare('SELECT * FROM (SELECT * FROM messages WHERE room = ? ORDER BY t DESC LIMIT 100) ORDER BY t'),
+};
+
+// 이전 버전의 JSON 파일(users.json, sessions.json)이 있으면 한 번만 옮겨 담는다
+(function migrateJson() {
+  const usersFile = path.join(DATA_DIR, 'users.json'), tokensFile = path.join(DATA_DIR, 'sessions.json');
+  if (!fs.existsSync(usersFile)) return;
+  const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return {}; } };
+  db.transaction(() => {
+    for (const [key, u] of Object.entries(read(usersFile)))
+      if (!q.getUser.get(key)) q.addUser.run(key, u.name, u.salt, u.hash, u.created || Date.now());
+    for (const [tok, s] of Object.entries(read(tokensFile)))
+      if (q.getUser.get(s.key) && s.exp > Date.now()) q.addSession.run(tok, s.key, s.exp);
+  })();
+  for (const f of [usersFile, tokensFile]) if (fs.existsSync(f)) fs.renameSync(f, f + '.migrated');
+  console.log('JSON 계정 데이터를 SQLite로 옮김');
+})();
+
+// ---------- 로그인 ----------
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
+function checkPw(u, pw) {
+  const a = Buffer.from(hashPw(pw, u.salt), 'hex'), b = Buffer.from(u.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function parseCookies(header = '') {
+  const out = {};
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function userFromCookie(header) {
+  const token = parseCookies(header).po_session;
+  const row = token && q.getSession.get(token, Date.now());
+  return row ? { key: row.key, name: row.name, token } : null;
+}
+
+function issueToken(res, key) {
+  const token = crypto.randomBytes(24).toString('hex');
+  q.purgeSessions.run(Date.now());
+  q.addSession.run(token, key, Date.now() + TOKEN_TTL_MS);
+  res.setHeader('Set-Cookie', `po_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${TOKEN_TTL_MS / 1000}`);
+}
+
+function readJson(req, limit = 4096) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > limit) { reject(new Error('too large')); req.destroy(); } });
+    req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
+
+// 로그인 관련 요청만 HTTP로 받는다 (쿠키를 심어야 하므로). 이동·채팅은 socket.io로.
+async function handleApi(req, res, pathname) {
+  const user = userFromCookie(req.headers.cookie);
+  if (pathname === '/api/me') return json(res, 200, { name: user ? user.name : null });
+  if (req.method !== 'POST') return json(res, 405, { error: 'POST만 가능' });
+  // JSON 본문만 받는다(다른 사이트의 폼 전송으로 요청을 위조하는 것을 막음)
+  if (!/^application\/json/.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'JSON만 가능' });
+  const body = await readJson(req);
+
+  if (pathname === '/api/signup' || pathname === '/api/login') {
+    const name = String(body.username || '').trim();
+    const pw = String(body.password || '');
+    const key = name.toLowerCase();
+    let u = q.getUser.get(key);
+    if (pathname === '/api/signup') {
+      if (!/^[\w가-힣]{2,16}$/.test(name)) return json(res, 400, { error: '이름은 2~16자 한글·영문·숫자·_ 만 가능해요' });
+      if (pw.length < 4 || pw.length > 128) return json(res, 400, { error: '비밀번호는 4자 이상이어야 해요' });
+      if (u) return json(res, 409, { error: '이미 있는 이름이에요' });
+      const salt = crypto.randomBytes(16).toString('hex');
+      q.addUser.run(key, name, salt, hashPw(pw, salt), Date.now());
+      u = q.getUser.get(key);
+    } else if (!u || !checkPw(u, pw)) {
+      return json(res, 401, { error: '이름 또는 비밀번호가 틀렸어요' });
+    }
+    issueToken(res, key);
+    return json(res, 200, { name: u.name });
+  }
+
+  if (pathname === '/api/logout') {
+    if (user) q.delSession.run(user.token);
+    res.setHeader('Set-Cookie', 'po_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+    return json(res, 200, { ok: true });
+  }
+  return json(res, 404, { error: 'not found' });
+}
+
 const server = http.createServer((req, res) => {
-  if (req.url === '/events') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
-    clients.add(res);
-    req.on('close', () => clients.delete(res));
+  const { pathname } = new URL(req.url, 'http://localhost');
+  if (pathname.startsWith('/api/')) {
+    handleApi(req, res, pathname).catch(() => { if (!res.headersSent) json(res, 400, { error: '잘못된 요청' }); });
     return;
   }
-  const file = req.url === '/' ? 'index.html' : req.url.slice(1);
+  const file = pathname === '/' ? 'index.html' : pathname.slice(1);
   if (!/^[\w.-]+$/.test(file)) { res.writeHead(404); return res.end(); }
   fs.readFile(path.join(__dirname, 'public', file), (err, body) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
@@ -309,6 +466,88 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// ---------- 실시간: socket.io ----------
+const ROOMS = ['office', 'lounge', 'meeting'];
+const SPAWN = { office: { x: 180, y: 140 }, lounge: { x: 14, y: 86 }, meeting: { x: 14, y: 86 } };
+const players = new Map(); // user key -> { name, room, x, y, conns, lastChat }
+let playersDirty = false;
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const playerList = () => [...players.values()].filter((p) => p.conns > 0)
+  .map(({ name, room, x, y, act }) => ({ name, room, x, y, act: act || null }));
+
+// 앉기·마시기 같은 동작 정보는 정해진 값만 받는다
+const ANIMS = new Set(['type', 'coffee', 'soda', 'read', 'write', 'pingpong']);
+const DIRS = new Set(['up', 'down', 'left', 'right']);
+function cleanAct(a) {
+  if (!a || typeof a !== 'object') return null;
+  const sx = Number(a.sx), sy = Number(a.sy);
+  return {
+    id: String(a.id || '').slice(0, 16),
+    a: ANIMS.has(a.a) ? a.a : null,
+    p: a.p === 'sit' ? 'sit' : 'stand',
+    d: DIRS.has(a.d) ? a.d : 'down',
+    c: !!a.c,
+    sx: Number.isFinite(sx) ? clamp(sx, 0, 240) : null,
+    sy: Number.isFinite(sy) ? clamp(sy, 0, 150) : null,
+  };
+}
+const history = () => Object.fromEntries(ROOMS.map((r) => [r, q.recent.all(r)]));
+
+io = new Server(server); // /socket.io/socket.io.js 클라이언트 스크립트도 자동으로 제공
+
+io.on('connection', (socket) => {
+  // 소켓 연결 때 브라우저가 보낸 쿠키로 로그인 사용자를 알아낸다
+  const user = userFromCookie(socket.handshake.headers.cookie);
+  socket.emit('agents', snapshot());
+  socket.emit('history', history());
+  if (user) {
+    let p = players.get(user.key);
+    if (!p) { p = { name: user.name, room: 'office', ...SPAWN.office, conns: 0 }; players.set(user.key, p); }
+    // 다시 접속하면 앉아 있던 동작은 풀고, 앉기 전 서 있던 자리로 돌려놓는다
+    if (p.conns === 0 && p.act) {
+      if (p.act.sx != null && p.act.sy != null) { p.x = p.act.sx; p.y = p.act.sy; }
+      p.act = null;
+    }
+    p.conns++;
+    playersDirty = true;
+  }
+  socket.emit('players', playerList());
+
+  socket.on('move', (m) => {
+    if (!user || !m || !ROOMS.includes(m.room)) return;
+    const x = Number(m.x), y = Number(m.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const p = players.get(user.key);
+    p.room = m.room; p.x = clamp(x, 0, 240); p.y = clamp(y, 0, 150);
+    p.act = cleanAct(m.act);
+    playersDirty = true;
+  });
+
+  socket.on('chat', (m, ack) => {
+    if (typeof ack !== 'function') ack = () => {};
+    if (!user) return ack({ error: '로그인이 필요해요' });
+    const text = String(m?.text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!text) return ack({ error: '빈 메시지' });
+    const p = players.get(user.key);
+    if (Date.now() - (p.lastChat || 0) < 300) return ack({ error: '너무 빨라요' });
+    p.lastChat = Date.now();
+    const msg = { id: crypto.randomBytes(6).toString('hex'), room: p.room, name: p.name, text, t: Date.now() };
+    q.addMessage.run(msg);
+    io.emit('chat', msg); // 다른 방 사람도 받아서 탭에 '안 읽음' 숫자를 띄운다
+    ack({ ok: true });
+  });
+
+  socket.on('disconnect', () => {
+    if (!user) return;
+    const p = players.get(user.key);
+    if (p) p.conns--;
+    playersDirty = true;
+  });
+});
+
+setInterval(() => { if (playersDirty) { playersDirty = false; io.emit('players', playerList()); } }, 100);
+
 tick();
 setInterval(tick, 1000);
-server.listen(PORT, '127.0.0.1', () => console.log(`Pixel Office → http://localhost:${PORT}`));
+server.listen(PORT, HOST, () => console.log(`Pixel Office → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`));
+

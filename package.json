@@ -9,6 +9,16 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["claude-code", "codex", "ai-agent", "pixel-art", "dashboard"],
-  "private": true
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agent",
+    "pixel-art",
+    "dashboard"
+  ],
+  "private": true,
+  "dependencies": {
+    "better-sqlite3": "^13.1.1",
+    "socket.io": "^4.8.4"
+  }
 }
