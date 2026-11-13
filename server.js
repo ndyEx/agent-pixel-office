@@ -386,7 +386,9 @@ function parseCookies(header = '') {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); }
+    catch { /* Ignore malformed cookies without rejecting the connection. */ }
   }
   return out;
 }
@@ -443,7 +445,12 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === '/api/logout') {
-    if (user) q.delSession.run(user.token);
+    if (user) {
+      q.delSession.run(user.token);
+      const connections = io.in(`session:${user.token}`);
+      connections.emit('sessionExpired');
+      connections.disconnectSockets(true);
+    }
     res.setHeader('Set-Cookie', 'po_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
     return json(res, 200, { ok: true });
   }
@@ -501,6 +508,8 @@ io.on('connection', (socket) => {
   socket.emit('agents', snapshot());
   socket.emit('history', history());
   if (user) {
+    socket.join(`session:${user.token}`);
+    socket.join(`user:${user.key}`);
     let p = players.get(user.key);
     if (!p) { p = { name: user.name, room: 'office', ...SPAWN.office, conns: 0 }; players.set(user.key, p); }
     // 다시 접속하면 앉아 있던 동작은 풀고, 앉기 전 서 있던 자리로 돌려놓는다
@@ -513,22 +522,35 @@ io.on('connection', (socket) => {
   }
   socket.emit('players', playerList());
 
+  function authenticated() {
+    if (!user) return false;
+    if (q.getSession.get(user.token, Date.now())) return true;
+    socket.emit('sessionExpired');
+    socket.disconnect(true);
+    return false;
+  }
+  // Idle connections must also lose access when their session expires.
+  const authTimer = user ? setInterval(authenticated, 1000) : null;
+
   socket.on('move', (m) => {
-    if (!user || !m || !ROOMS.includes(m.room)) return;
+    if (!authenticated() || !m || !ROOMS.includes(m.room)) return;
     const x = Number(m.x), y = Number(m.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     const p = players.get(user.key);
     p.room = m.room; p.x = clamp(x, 0, 240); p.y = clamp(y, 0, 150);
     p.act = cleanAct(m.act);
+    // Send authoritative movement to this user's other tabs, excluding this one.
+    socket.to(`user:${user.key}`).emit('playerMoved', { name: p.name, room: p.room, x: p.x, y: p.y, act: p.act });
     playersDirty = true;
   });
 
   socket.on('chat', (m, ack) => {
     if (typeof ack !== 'function') ack = () => {};
-    if (!user) return ack({ error: '로그인이 필요해요' });
+    if (!authenticated()) return ack({ error: '로그인이 필요해요' });
     const text = String(m?.text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (!text) return ack({ error: '빈 메시지' });
     const p = players.get(user.key);
+    if (m.room !== p.room) return ack({ error: '다른 탭에서 방이 변경됐어요. 현재 방을 확인하고 다시 보내주세요.' });
     if (Date.now() - (p.lastChat || 0) < 300) return ack({ error: '너무 빨라요' });
     p.lastChat = Date.now();
     const msg = { id: crypto.randomBytes(6).toString('hex'), room: p.room, name: p.name, text, t: Date.now() };
@@ -538,6 +560,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    if (authTimer) clearInterval(authTimer);
     if (!user) return;
     const p = players.get(user.key);
     if (p) p.conns--;

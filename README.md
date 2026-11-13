@@ -6,7 +6,7 @@ AI 코딩 에이전트(**Claude Code**, **Codex**)가 지금 무슨 일을 하�
 
 ## 실행
 
-Node.js 18 이상이 필요합니다.
+Node.js 22 이상이 필요합니다.
 
 ```bash
 npm install

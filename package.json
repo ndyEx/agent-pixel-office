@@ -4,10 +4,11 @@
   "description": "Claude Code와 Codex 에이전트의 작업 상태를 픽셀아트 가상 사무실로 실시간 시각화",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "keywords": [
     "claude-code",

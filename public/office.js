@@ -607,6 +607,17 @@ function sync(data) {
   renderTabs();
 }
 
+function syncOwnPosition(s) {
+  if (!me || s.name !== me.name) return;
+  Object.assign(me, { room: s.room, x: s.x, y: s.y, placed: true, moving: false,
+    act: s.act ? { ...s.act, sx: s.act.sx ?? s.x, sy: s.act.sy ?? s.y } : null });
+  if (s.act) me.dir = s.act.d;
+  dirtyMove = false;
+  keys.clear(); resetJoy();
+  viewRoom = s.room; unread[s.room] = 0;
+  renderChat(); renderTabs();
+}
+
 function syncPeople(list) {
   const names = new Set(list.map((p) => p.name));
   for (const n of people.keys()) if (!names.has(n)) people.delete(n);
@@ -617,10 +628,7 @@ function syncPeople(list) {
     p.room = s.room; p.tx = s.x; p.ty = s.y; p.act = s.act || null;
     if (p.act) p.dir = p.act.d;
     if (me && s.name === me.name && !me.placed) {
-      Object.assign(me, { room: s.room, x: s.x, y: s.y, placed: true });
-      // 서버에 앉은 상태가 남아 있으면 그대로 이어받는다 (일어설 때 돌아갈 자리 포함)
-      if (s.act) { me.act = { ...s.act, sx: s.act.sx ?? s.x, sy: s.act.sy ?? s.y }; me.dir = s.act.d; }
-      viewRoom = s.room; renderChat();
+      syncOwnPosition(s);
     }
   }
   renderTabs();
@@ -698,7 +706,7 @@ document.getElementById('chat-form').addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text || !me || !socket) return;
   // 서버가 저장·전송을 마치면 ack 콜백으로 결과를 알려준다
-  socket.timeout(5000).emit('chat', { text }, (err, res) => {
+  socket.timeout(5000).emit('chat', { text, room: viewRoom }, (err, res) => {
     if (err) return flash('전송 시간 초과');
     if (res?.error) return flash(res.error);
     input.value = '';
@@ -749,11 +757,19 @@ function connect() {
   socket = io({ forceNew: true });
   socket.on('connect', () => {
     conn.textContent = '● 실시간 연결됨'; conn.style.color = '#7bd88f';
-    if (me && me.placed) sendMove(true); // 서버가 재시작됐어도 내 위치를 다시 알려준다
+    // Reconcile with the server after reconnecting; another tab may have moved.
+    if (me) { me.placed = false; dirtyMove = false; }
   });
   socket.on('disconnect', () => { conn.textContent = '○ 재연결 중…'; conn.style.color = '#ff5c7a'; });
   socket.on('agents', sync);
   socket.on('players', syncPeople);
+  socket.on('playerMoved', syncOwnPosition);
+  socket.on('sessionExpired', () => {
+    me = null; dirtyMove = false; keys.clear();
+    renderAuth(); renderTabs();
+    flash('로그인 세션이 종료됐어요. 다시 로그인해주세요.');
+    connect();
+  });
   socket.on('history', (h) => {
     for (const r of ROOMS) chats[r.id] = h[r.id] || [];
     renderChat();
