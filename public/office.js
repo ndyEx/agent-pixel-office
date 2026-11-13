@@ -5,6 +5,8 @@ const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
 const S = 4; // 월드 1칸 = 화면 4px (월드 크기 240 x 150)
 
+// 승인 대기는 확실할 때(Codex 이벤트·Claude 훅)와 침묵 시간으로 추정할 때 이름을 다르게
+const stateLabel = (d) => (d.state === 'waiting' && !d.waitExact ? '대기(승인?)' : (STATE_INFO[d.state] || STATE_INFO.working).label);
 const STATE_INFO = {
   typing:   { label: '타이핑',   color: '#7bd88f' },
   reading:  { label: '자료 조사', color: '#f5c26b' },
@@ -13,7 +15,7 @@ const STATE_INFO = {
   meeting:  { label: '회의',     color: '#bb9af7' },
   working:  { label: '작업 중',  color: '#7dcfff' },
   thinking: { label: '생각 중',  color: '#c0caf5' },
-  waiting:  { label: '대기(승인?)', color: '#ff5c7a' },
+  waiting:  { label: '승인 대기', color: '#ff5c7a' },
   idle:     { label: '휴식',     color: '#6b7089' },
 };
 
@@ -384,15 +386,21 @@ function drawTags(tags) {
 
 // ---------- 마우스를 올리거나 탭하면 자세한 카드 ----------
 const pointer = { x: -1, y: -1, pinned: false };
+let lastTags = [];
+// 에이전트를 클릭(탭)하면 상세 패널
+canvas.addEventListener('click', (e) => {
+  const tg = hitTest(lastTags, e.offsetX, e.offsetY);
+  if (tg?.kind && tg.a.data.id) openDetail(tg.a.data.id);
+});
 canvas.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') { pointer.x = e.offsetX; pointer.y = e.offsetY; } });
 canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && !pointer.pinned) pointer.x = pointer.y = -1; });
 canvas.addEventListener('pointerdown', (e) => { // 터치: 탭한 곳의 캐릭터 카드를 띄우고, 빈 곳을 탭하면 닫힘
   if (e.pointerType !== 'mouse') { pointer.x = e.offsetX; pointer.y = e.offsetY; pointer.pinned = true; }
 });
 
-function hitTest(tags) {
-  if (pointer.x < 0) return null;
-  const { k } = view, px = pointer.x, py = pointer.y;
+function hitTest(tags, px = pointer.x, py = pointer.y) {
+  if (px < 0) return null;
+  const { k } = view;
   // 위에 그려진(앞쪽) 캐릭터부터: 몸 영역 또는 이름표
   for (let i = tags.length - 1; i >= 0; i--) {
     const tg = tags[i], half = 7 * S * k;
@@ -412,8 +420,9 @@ function drawCard(tags) {
   if (tg.kind) {
     const info = STATE_INFO[d.state] || STATE_INFO.working;
     lines.push({ text: `${tg.kind.label} · ${titleFor(d)}`, font: font(10), color: a.band || '#c0caf5' });
-    lines.push({ text: `● ${info.label}`, font: font(10, true), color: info.color });
+    lines.push({ text: `● ${stateLabel(d)}`, font: font(10, true), color: info.color });
     if (d.detail) lines.push({ text: d.detail.length > 34 ? d.detail.slice(0, 33) + '…' : d.detail, font: font(10), color: '#9a9cb5' });
+    lines.push({ text: '클릭하면 자세히 보기', font: font(9), color: '#6b7089' });
   } else {
     lines.push({ text: a.isMe ? '나' : '사람', font: font(10), color: '#c0caf5' });
   }
@@ -476,6 +485,7 @@ const keys = new Set();
 const KEYMAP = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
 const typingInField = (e) => /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
 addEventListener('keydown', (e) => {
+  if (!detailEl.hidden) { if (e.key === 'Escape') closeDetail(); return; } // 상세 패널이 열려 있으면 이동·채팅 단축키는 쉰다
   if (typingInField(e)) { if (e.key === 'Escape') e.target.blur(); return; }
   if (KEYMAP[e.key] && me) { keys.add(e.key); e.preventDefault(); }
   // Enter: 지금 화면에 보이는 채팅 입력칸으로 (좁은 화면이면 사무실 화면 바로 아래 입력칸), 페이지는 스크롤하지 않음
@@ -674,6 +684,7 @@ function frame(t) {
   layoutTags(tags);                                 // 겹치는 이름표는 옆으로
   drawTags(tags);
   drawCard(tags);                                   // 마우스를 올린(탭한) 캐릭터의 자세한 카드
+  lastTags = tags;                                  // 클릭 판정용
 
   if (viewRoom === 'office' && !list.length) {
     const { k, f } = view, cx = canvas.clientWidth / 2, cy = 100 * S * k;
@@ -706,6 +717,8 @@ function sync(data) {
   assignDesks();
   renderList();
   renderTabs();
+  checkAlerts(data);
+  if (detail.id) fetchDetail();
 }
 
 function syncOwnPosition(s) {
@@ -735,7 +748,7 @@ function syncPeople(list) {
   renderTabs();
 }
 
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function ago(ts) { if (!ts) return ''; const s = Math.round((Date.now() - ts) / 1000); return s < 60 ? `${s}초 전` : `${Math.round(s / 60)}분 전`; }
 const hhmm = (ts) => new Date(ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 
@@ -745,11 +758,11 @@ function renderList() {
   el.innerHTML = sessions.map((s) => {
     const info = STATE_INFO[s.state] || STATE_INFO.working;
     const a = agents.get(s.id);
-    return `<div class="card">
+    return `<div class="card agent-card" data-id="${esc(s.id)}" title="클릭하면 자세히 보기">
       <div class="top"><span class="dot" style="background:${a?.band || a?.look.shirt}"></span>
         <span class="who ${s.agent}"${a?.band ? ` style="background:${a.band}"` : ''}>${s.agent === 'codex' ? 'Codex' : 'Claude'}</span>
         <span class="name" title="${esc(s.title)}">${s.isSub ? '↳ ' : ''}${esc(s.title)}</span>
-        <span class="badge" style="color:${info.color}">${info.label}</span></div>
+        <span class="badge" style="color:${info.color}">${stateLabel(s)}</span></div>
       <div class="rank">${titleFor(s)}</div>
       <div class="detail">${esc(s.detail || '')}</div>
       <div class="detail">${esc(s.project)} · 도구 ${s.tools}회 · ${ago(s.lastEvent)}</div>
@@ -757,7 +770,11 @@ function renderList() {
     </div>`;
   }).join('');
 }
-setInterval(renderList, 5000);
+setInterval(() => { renderList(); if (detail.id) renderDetail(); }, 5000);
+document.getElementById('list').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-id]');
+  if (c) openDetail(c.dataset.id);
+});
 
 // 방 탭: 로그인 전엔 구경할 방을 고르고, 로그인 후엔 그 방으로 바로 이동
 function renderTabs() {
@@ -912,6 +929,165 @@ function connect() {
   socket.on('chatCleared', onChatCleared);
   socket.on('avatars', (map) => { avatars.clear(); for (const [n, av] of Object.entries(map || {})) setAvatar(n, av); });
   socket.on('avatar', ({ name, avatar }) => setAvatar(name, avatar));
+}
+
+// ---------- 알림: 승인 대기·작업 완료 ----------
+// 설정은 브라우저마다 따로 저장 (데스크톱 알림 권한도 브라우저마다 따로라서)
+const NOTI_KEY = 'po_notify';
+const notiPref = (() => { try { return JSON.parse(localStorage.getItem(NOTI_KEY)) || {}; } catch { return {}; } })();
+const saveNoti = () => { try { localStorage.setItem(NOTI_KEY, JSON.stringify(notiPref)); } catch { /* 저장 불가 */ } };
+const canNotify = 'Notification' in window;
+const notiBtn = document.getElementById('noti-btn'), soundBtn = document.getElementById('sound-btn');
+
+function renderNoti() {
+  notiBtn.hidden = !canNotify;
+  const on = canNotify && notiPref.on && Notification.permission === 'granted';
+  notiBtn.textContent = on ? '🔔 알림 켬' : '🔕 알림 끔';
+  notiBtn.classList.toggle('on', on);
+  notiBtn.title = on ? '다른 창을 보고 있을 때 승인 대기·작업 완료를 데스크톱 알림으로 알려요' : '데스크톱 알림 켜기';
+  soundBtn.textContent = notiPref.sound ? '🔊 소리 켬' : '🔇 소리 끔';
+  soundBtn.classList.toggle('on', !!notiPref.sound);
+}
+notiBtn.addEventListener('click', async () => {
+  if (notiPref.on) notiPref.on = false;
+  else {
+    const perm = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+    if (perm === 'granted') notiPref.on = true;
+    else flash('브라우저에서 알림이 막혀 있어요. 주소창 왼쪽 사이트 설정에서 허용해 주세요');
+  }
+  saveNoti(); renderNoti();
+});
+soundBtn.addEventListener('click', () => {
+  notiPref.sound = !notiPref.sound; saveNoti(); renderNoti();
+  if (notiPref.sound) beep('done'); // 들려주면서 오디오도 켠다(브라우저는 클릭 뒤에만 소리를 허용)
+});
+
+// 8비트 효과음: 사각파로 짧은 음 몇 개
+const SOUNDS = { waiting: [[880, 0.09], [1175, 0.09], [880, 0.09], [1175, 0.16]], done: [[523, 0.08], [659, 0.08], [784, 0.08], [1047, 0.2]] };
+let audio = null;
+function beep(kind) {
+  if (!notiPref.sound) return;
+  try {
+    audio ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();
+    let t = audio.currentTime + 0.02;
+    for (const [freq, dur] of SOUNDS[kind]) {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = 'square'; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+      o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur);
+      t += dur * 0.85;
+    }
+  } catch { /* 오디오 미지원 */ }
+}
+// 새로고침 뒤에는 첫 클릭·키 입력 때 오디오를 깨워 둔다
+for (const ev of ['pointerdown', 'keydown']) addEventListener(ev, () => { if (notiPref.sound && audio?.state === 'suspended') audio.resume(); }, { capture: true });
+
+let prevStates = null; // id -> state (첫 수신 때는 알리지 않음)
+function checkAlerts(data) {
+  if (prevStates) {
+    for (const d of data) {
+      const prev = prevStates.get(d.id);
+      if (!prev) continue;
+      if (d.state === 'waiting' && prev !== 'waiting') alertAgent(d, 'waiting');
+      // 침묵이 길어 휴식으로 바뀐 경우가 아니라 실제로 턴을 끝냈을 때만 (조수는 끝날 때마다 울리면 시끄러움)
+      else if (!d.isSub && d.state === 'idle' && prev !== 'idle' && /^작업 완료/.test(d.detail)) alertAgent(d, 'done');
+    }
+  }
+  prevStates = new Map(data.map((d) => [d.id, d.state]));
+  const waiting = data.filter((d) => d.state === 'waiting').length;
+  document.title = waiting ? `(${waiting}) ❗ 승인 대기 · Pixel Office` : 'Pixel Office';
+}
+
+function alertAgent(d, kind) {
+  beep(kind);
+  if (!(canNotify && notiPref.on && Notification.permission === 'granted') || document.hasFocus()) return;
+  const title = kind === 'waiting' ? `❗ ${d.title} — 승인 대기` : `✔ ${d.title} — 작업 완료`;
+  const what = kind === 'done' ? '작업을 마치고 다음 요청을 기다려요'
+    : d.waitExact ? d.detail || '승인을 기다려요' : '한동안 응답이 없어요 (승인을 기다리는 것 같아요)';
+  try {
+    const n = new Notification(title, { body: `${d.project ? `${d.project} · ` : ''}${what}`, tag: `${kind}:${d.id}`, silent: !!notiPref.sound });
+    n.onclick = () => { window.focus(); openDetail(d.id); n.close(); };
+  } catch { /* 일부 모바일 브라우저는 페이지에서 바로 알림을 못 만듦 */ }
+}
+renderNoti();
+
+// ---------- 상세 패널: 에이전트를 클릭하면 ----------
+const detailEl = document.getElementById('detail');
+const detail = { id: null, data: null, gone: false, pending: false };
+
+function openDetail(id) {
+  if (detail.id !== id) { detail.data = agents.get(id)?.data ? { ...agents.get(id).data } : null; detail.gone = false; }
+  detail.id = id;
+  detailEl.hidden = false;
+  keys.clear(); resetJoy();
+  renderDetail(); fetchDetail();
+  document.getElementById('dt-close')?.focus({ preventScroll: true });
+}
+function closeDetail() {
+  detail.id = null; detailEl.hidden = true;
+  canvas.focus({ preventScroll: true });
+}
+detailEl.addEventListener('click', (e) => { if (e.target === detailEl || e.target.closest('#dt-close')) closeDetail(); });
+
+function fetchDetail() {
+  if (!detail.id || !socket || detail.pending) return;
+  const id = detail.id;
+  detail.pending = true;
+  socket.timeout(4000).emit('agentDetail', id, (err, res) => {
+    detail.pending = false;
+    if (err || detail.id !== id) return;
+    if (res) { detail.data = res; detail.gone = false; } else detail.gone = true;
+    renderDetail();
+  });
+}
+
+const hhmmss = (ts) => new Date(ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function renderDetail() {
+  const d = detail.data, body = document.getElementById('dt-body');
+  if (!d) { body.innerHTML = '<div class="empty">불러오는 중…</div>'; return; }
+  const info = STATE_INFO[d.state] || STATE_INFO.working, a = agents.get(d.id);
+  const chip = KIND_CHIP[d.agent] || KIND_CHIP.claude, band = a?.band || chip.bg;
+  const section = (title, html) => `<section class="dt-sec"><h3>${title}</h3>${html}</section>`;
+  let html = `<div class="dt-head">
+      <span class="who ${d.agent}" style="background:${band}">${chip.label}</span>
+      <h2 id="dt-title" title="${esc(d.title)}">${d.isSub ? '↳ ' : ''}${esc(d.title)}</h2>
+      <button class="btn ghost" id="dt-close" type="button" aria-label="닫기">✕</button></div>
+    <div class="dt-state" style="--c:${info.color}"><b>● ${esc(stateLabel(d))}</b> <span>${esc(d.detail || '')}</span></div>
+    <div class="dt-meta">${[d.project && `📁 ${esc(d.project)}`, `${titleFor(d)} · 도구 ${d.tools}회`,
+      d.startedAt && `시작 ${hhmm(d.startedAt)}`, d.lastEvent && `마지막 활동 ${ago(d.lastEvent)}`].filter(Boolean).join('<span>·</span>')}</div>`;
+  if (detail.gone) html += '<div class="dt-note">이 세션은 최근 30분간 활동이 없어 사무실을 떠났어요. 마지막으로 본 내용이에요.</div>';
+  if (d.state === 'waiting') {
+    html += d.waitExact
+      ? '<div class="dt-note warn">❗ 승인을 기다리고 있어요. 에이전트 화면에서 허용하거나 거절해 주세요.</div>'
+      : `<div class="dt-note warn">45초 넘게 응답이 없어 승인 대기로 <b>추정</b>했어요. 오래 걸리는 명령일 수도 있어요.
+          ${d.agent === 'claude' ? '<br>Claude Code 훅을 연결하면 정확해져요 → <code>npm run hook-config</code>' : ''}</div>`;
+  }
+  if (d.lastPrompt?.text) {
+    html += section(`최근 요청 <small>${hhmm(d.lastPrompt.t)}</small>`, `<p class="dt-prompt">${esc(d.lastPrompt.text)}</p>`);
+    if (d.firstMessage && d.firstMessage !== d.lastPrompt.text) html += section('첫 요청', `<p class="dt-prompt dim">${esc(d.firstMessage)}</p>`);
+  }
+  const counts = Object.entries(d.byState || {}).filter(([, n]) => n).sort((p, q) => q[1] - p[1]);
+  const total = counts.reduce((n, [, c]) => n + c, 0);
+  if (total) {
+    html += section('하는 일 <small>읽은 기록 기준</small>', `<div class="dt-bar">${counts.map(([st, n]) =>
+      `<i style="flex:${n};background:${(STATE_INFO[st] || STATE_INFO.working).color}" title="${(STATE_INFO[st] || STATE_INFO.working).label} ${n}회"></i>`).join('')}</div>
+      <div class="dt-legend">${counts.map(([st, n]) => `<span><i style="background:${(STATE_INFO[st] || STATE_INFO.working).color}"></i>${(STATE_INFO[st] || STATE_INFO.working).label} ${n}</span>`).join('')}</div>`);
+  }
+  if (d.files?.length) {
+    html += section(`만진 파일 <small>${d.files.length}개</small>`, `<ul class="dt-files">${d.files.map((f) =>
+      `<li title="${esc(f.path)}"><span class="ico">${f.edits ? '✏️' : '📖'}</span><span class="path">${esc(f.path)}</span>
+        <span class="cnt">${[f.edits && `수정 ${f.edits}`, f.reads && `읽기 ${f.reads}`].filter(Boolean).join(' · ')}</span></li>`).join('')}</ul>`);
+  }
+  if (d.history?.length) {
+    html += section('타임라인', `<ol class="dt-log">${d.history.map((h) => `<li><time>${hhmmss(h.t)}</time><span>${esc(h.text)}</span></li>`).join('')}</ol>`);
+  } else if (d.log?.length) {
+    html += section('타임라인', `<ol class="dt-log">${d.log.slice().reverse().map((h) => `<li><time>${hhmmss(h.t)}</time><span>${esc(h.text)}</span></li>`).join('')}</ol>`);
+  }
+  const scroll = body.scrollTop, focused = document.activeElement?.id === 'dt-close';
+  body.innerHTML = html;
+  body.scrollTop = scroll;
+  if (focused) document.getElementById('dt-close').focus({ preventScroll: true });
 }
 
 // ---------- 캐릭터 꾸미기 ----------

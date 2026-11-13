@@ -157,6 +157,49 @@
   .av-gap { flex: 1; }
   #auth-in .btn + .btn { margin-left: 0; }
   #chat-form { display: flex; gap: 6px; margin-top: 6px; }
+  /* 알림·소리 토글 */
+  .noti { display: flex; gap: 6px; }
+  .noti .btn { padding: 4px 9px; font-size: 12px; white-space: nowrap; }
+  .noti .btn.on { border-color: var(--accent); color: var(--accent); }
+  .noti .btn[hidden] { display: none; }
+  .agent-card { cursor: pointer; transition: border-color .15s; }
+  .agent-card:hover { border-color: #5a5f80; }
+  /* 상세 패널: PC는 오른쪽 서랍, 폰은 아래에서 올라오는 시트 */
+  .dt-modal { position: fixed; inset: 0; z-index: 40; background: #0008; display: flex; justify-content: flex-end; }
+  .dt-modal[hidden] { display: none; }
+  .dt-panel { width: min(440px, 100%); height: 100%; background: var(--panel); border-left: 1px solid var(--line);
+    box-shadow: -8px 0 24px #0006; display: flex; flex-direction: column; }
+  #dt-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .dt-head { display: flex; align-items: center; gap: 8px; }
+  .dt-head h2 { font-size: 16px; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #dt-close { padding: 2px 10px; }
+  .dt-state { border-left: 3px solid var(--c); padding: 4px 10px; background: #00000030; border-radius: 0 6px 6px 0; font-size: 13px; word-break: break-all; }
+  .dt-state b { color: var(--c); }
+  .dt-state span { color: var(--muted); }
+  .dt-meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .dt-note { font-size: 12px; padding: 8px 10px; border-radius: 6px; background: #ffffff0d; color: var(--muted); }
+  .dt-note.warn { background: #ff5c7a1f; color: #ffb3c1; }
+  .dt-note code { background: #0006; padding: 0 4px; border-radius: 3px; color: var(--text); }
+  .dt-sec h3 { font-size: 12px; margin: 0 0 6px; color: var(--accent); }
+  .dt-sec h3 small { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .dt-prompt { margin: 0; font-size: 13px; background: var(--bg); padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-word;
+    max-height: 9.5em; overflow-y: auto; }
+  .dt-prompt.dim { color: var(--muted); font-size: 12px; }
+  .dt-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px; }
+  .dt-legend { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .dt-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .dt-files, .dt-log { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+  .dt-files li { display: flex; gap: 6px; align-items: center; padding: 3px 0; border-bottom: 1px solid #ffffff08; }
+  .dt-files .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dt-files .cnt { color: var(--muted); font-size: 11px; flex: none; }
+  .dt-log li { display: flex; gap: 8px; padding: 2px 0; }
+  .dt-log time { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+  .dt-log span { min-width: 0; word-break: break-all; }
+  @media (max-width: 600px) {
+    .dt-modal { align-items: flex-end; }
+    .dt-panel { height: 82vh; border-left: 0; border-top: 1px solid var(--line); border-radius: 12px 12px 0 0; }
+    .noti .btn { padding: 4px 7px; }
+  }
   #chat-input { flex: 1; }
 </style>
 </head>
@@ -165,6 +208,7 @@
   <h1>▣ Pixel Office</h1>
   <span class="sub">에이전트는 사무실에서 일하고, 사람은 방을 돌아다니며 채팅해요</span>
   <span id="conn">연결 중…</span>
+  <div class="noti"><button class="btn ghost" id="noti-btn" type="button">🔕 알림 끔</button><button class="btn ghost" id="sound-btn" type="button" title="승인 대기·작업 완료 때 효과음">🔇 소리 끔</button></div>
   <div class="auth">
     <div id="auth-out">
       <form id="auth-form">
@@ -205,10 +249,12 @@
       <div>⌨ 타이핑 — Edit/Write</div><div>📚 책장 — Read/Grep</div>
       <div>🖥 서버랙 — Bash</div><div>🌐 브라우징 — Web</div>
       <div>👥 회의 — Agent</div><div>💭 생각 중</div>
-      <div>❗ 승인 대기 (Claude는 추정)</div><div>☕ 휴식 — 턴 종료</div>
+      <div>❗ 승인 대기 (Claude는 훅이 없으면 추정)</div><div>☕ 휴식 — 턴 종료</div>
     </div>
   </section>
 </main>
+<!-- 에이전트 상세 패널 -->
+<div id="detail" class="dt-modal" hidden><div class="dt-panel" role="dialog" aria-modal="true" aria-labelledby="dt-title"><div id="dt-body"></div></div></div>
 <script src="/socket.io/socket.io.js"></script>
 <script src="sprites.js"></script>
 <script src="scenery.js"></script>

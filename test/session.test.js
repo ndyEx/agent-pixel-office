@@ -10,17 +10,17 @@ const WebSocket = require('ws');
 const root = path.resolve(__dirname, '..');
 
 // Run the actual HTTP/Socket.IO handlers with an isolated, in-memory SQLite DB.
-async function startServer(t) {
+async function startServer(t, { home = path.join(root, 'test', 'no-home') } = {}) {
   const timers = new Set();
   const context = vm.createContext({
     __dirname: root, Buffer, URL, console: { log() {} },
-    process: { env: { PORT: '0', HOST: '127.0.0.1', CODEX_SESSIONS: path.join(root, 'test', 'no-sessions') } },
+    process: { env: { PORT: '0', HOST: '127.0.0.1', CODEX_SESSIONS: path.join(root, 'test', 'no-sessions'), HOOK_TOKEN: 'test-hook-token' } },
     setInterval(fn, ms) { const timer = setInterval(fn, ms); timers.add(timer); return timer; },
     clearInterval,
     require(name) {
       if (name === 'better-sqlite3') return function () { return new Database(':memory:'); };
       if (name === 'fs') return { ...fs, mkdirSync() {}, existsSync() { return false; } };
-      if (name === 'os') return { homedir: () => path.join(root, 'test', 'no-home') };
+      if (name === 'os') return { homedir: () => home };
       return require(name);
     },
   });
@@ -206,5 +206,66 @@ test('chat reset and custom avatars', async t => {
 
     assert.equal((await post({ avatar: null }, aliceCookie)).status, 200);
     assert.equal((await bob.event('avatar')).avatar, null);
+  });
+});
+
+test('Claude Code hooks mark exact approval waits and the detail panel reads session history', async t => {
+  const home = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'po-hook-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const dir = path.join(home, '.claude', 'projects', '-tmp-demo');
+  fs.mkdirSync(dir, { recursive: true });
+  const id = '11111111-2222-3333-4444-555555555555';
+  const file = path.join(dir, id + '.jsonl');
+  const now = new Date().toISOString();
+  const line = (o) => JSON.stringify({ sessionId: id, cwd: '/tmp/demo', timestamp: now, ...o }) + '\n';
+  fs.writeFileSync(file,
+    line({ type: 'user', message: { role: 'user', content: 'fix the login bug' } }) +
+    line({ type: 'assistant', message: { content: [
+      { type: 'tool_use', name: 'Read', input: { file_path: '/tmp/demo/src/login.js' } },
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } }));
+
+  const app = await startServer(t, { home });
+  const hook = (body, token = 'test-hook-token') => fetch(app.url + '/api/hook', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hook-Token': token }, body: JSON.stringify(body) });
+  const guest = await connect(t, app.url);
+  const initial = await guest.event('agents');
+  assert.equal(initial[0].state, 'terminal');
+  assert.equal(initial[0].waitExact, false);
+
+  await t.test('hook requests need the token and stay inside the session folder', async () => {
+    assert.equal((await hook({ hook_event_name: 'Notification', transcript_path: file }, 'wrong')).status, 403);
+    const outside = await hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt', transcript_path: '/etc/passwd' });
+    assert.equal((await outside.json()).ok, false);
+  });
+
+  await t.test('a permission notification turns the agent into an exact wait, and the tool result clears it', async () => {
+    assert.equal((await hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt',
+      message: 'Claude needs your permission to use Bash', transcript_path: file })).status, 200);
+    let list = await guest.event('agents');
+    assert.equal(list[0].state, 'waiting');
+    assert.equal(list[0].waitExact, true);
+    assert.match(list[0].detail, /permission/);
+
+    // 기록에 다른 assistant 줄이 더 붙어도 사용자가 답하기 전까지는 대기 유지
+    fs.appendFileSync(file, line({ type: 'assistant', message: { content: [{ type: 'text', text: 'hmm' }] } }));
+    await hook({ hook_event_name: 'Notification', notification_type: 'idle_prompt', transcript_path: file }); // 서버가 기록을 따라잡게
+    const snap = await guest.request('agentDetail', file);
+    assert.equal(snap.state, 'waiting');
+
+    fs.appendFileSync(file, line({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }));
+    await hook({ hook_event_name: 'Stop', transcript_path: file });
+    const after = await guest.request('agentDetail', file);
+    assert.equal(after.state, 'thinking');
+    assert.equal(after.waitExact, false);
+  });
+
+  await t.test('agentDetail returns prompt, files and history; unknown ids return null', async () => {
+    const d = await guest.request('agentDetail', file);
+    assert.equal(d.lastPrompt.text, 'fix the login bug');
+    assert.deepEqual(d.files.map((f) => f.path), ['src/login.js']);
+    assert.equal(d.files[0].reads, 1);
+    assert.ok(d.history.some((h) => /npm test/.test(h.text)));
+    assert.ok(d.history.some((h) => /login\.js/.test(h.text)), 'parallel tool calls are all in the timeline');
+    assert.equal(await guest.request('agentDetail', '/nope.jsonl'), null);
   });
 });

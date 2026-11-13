@@ -34,7 +34,7 @@ function describeTool(name, input = {}) {
   if (input.command) return `${name}: ${short(input.command)}`;
   if (input.url) return `${name}: ${short(input.url)}`;
   if (input.query) return `${name}: ${short(input.query)}`;
-  return name.replace(/^mcp__[^_]+__/, '');
+  return name.replace(/^mcp__.+?__/, '');
 }
 
 function newSession(file, agent) {
@@ -54,20 +54,56 @@ function newSession(file, agent) {
     offset: 0,
     partial: '',
     tools: 0,
-    log: [],
+    log: [],        // 목록 카드용: 서버가 지켜보는 동안 생긴 일 최근 6개
+    history: [],    // 상세 패널용: 기록에 남은 시각으로 최근 HISTORY_MAX개 (처음 읽은 끝부분 포함)
+    files: new Map(), // 만진 파일: 경로 -> { path, edits, reads, t } (최근 것이 뒤)
+    byState: {},    // 도구 종류별 횟수 (읽은 범위 기준)
+    cwd: '',
+    lastPrompt: null, // { text, t }
+    startedAt: (() => { try { return fs.statSync(file).birthtimeMs || 0; } catch { return 0; } })(),
+    hooked: false,  // Claude Code 훅 이벤트를 한 번이라도 받았나 (받았으면 침묵 추정을 끈다)
+    hookWait: false, // 훅이 알려 준 승인 대기 중
+    waitDetail: '',
   };
 }
 
-function pushLog(s, text) {
+const HISTORY_MAX = 60, FILES_MAX = 40;
+function pushLog(s, text, ts = Date.now(), live = true) {
+  s.history.push({ t: ts, text });
+  if (s.history.length > HISTORY_MAX) s.history.shift();
+  if (!live) return;
   s.log.push({ t: Date.now(), text });
   if (s.log.length > 6) s.log.shift();
+}
+
+function touchFile(s, file, kind, ts) {
+  if (!file || typeof file !== 'string') return;
+  const f = s.files.get(file) || { path: file, edits: 0, reads: 0, t: 0 };
+  if (kind === 'edit') f.edits++; else f.reads++;
+  f.t = Math.max(f.t, ts);
+  s.files.delete(file); s.files.set(file, f); // 최근에 만진 파일이 뒤로
+  if (s.files.size > FILES_MAX) s.files.delete(s.files.keys().next().value);
+}
+
+// 사용자 요청 글: 문자열이거나 text 조각 배열. '<'로 시작하는 조각은 명령·시스템 안내라 뺀다
+function promptText(c) {
+  const parts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((x) => x.type === 'text').map((x) => x.text || '') : [];
+  const clean = parts.map((t) => t.trim()).filter((t) => t && !t.startsWith('<') && !t.startsWith('[Request interrupted'))
+    .join(' ').replace(/\s+/g, ' ').trim();
+  return clean.slice(0, 400);
+}
+
+function setPrompt(s, text, ts) {
+  if (!text) return;
+  s.lastPrompt = { text, t: ts };
+  if (!s.firstMessage) s.firstMessage = text;
 }
 
 function applyEntry(s, e, live) {
   const ts = e.timestamp ? Date.parse(e.timestamp) : Date.now();
   if (e.type === 'agent-name' && e.agentName) s.title = e.agentName;
   // 프로젝트 이름: 폴더 이름(경로의 /를 -로 바꾼 것)은 어디서 끊어야 할지 모르므로, 기록에 남은 실제 작업 폴더(cwd)를 쓴다
-  if (typeof e.cwd === 'string' && e.cwd) s.project = path.basename(e.cwd.replace(/[\\/]+$/, '')).slice(-32);
+  if (typeof e.cwd === 'string' && e.cwd) { s.cwd = e.cwd; s.project = path.basename(e.cwd.replace(/[\\/]+$/, '')).slice(-32); }
   if (e.type === 'summary' && e.summary && s.title.length <= 8) s.title = e.summary;
   // 포크·사이드 채팅은 원래 대화 기록을 그대로 복사해 둔다(sessionId가 원본 것).
   // 복사된 기록은 이 세션이 한 일이 아니므로 상태 계산에서 뺀다.
@@ -75,28 +111,44 @@ function applyEntry(s, e, live) {
   if (e.type === 'assistant' && e.message) {
     s.lastEvent = ts;
     const content = Array.isArray(e.message.content) ? e.message.content : [];
-    const tool = [...content].reverse().find((c) => c.type === 'tool_use');
+    const uses = content.filter((c) => c.type === 'tool_use');
+    const tool = uses[uses.length - 1];
+    for (const u of uses) {
+      const kind = classifyTool(u.name), input = u.input || {};
+      s.byState[kind] = (s.byState[kind] || 0) + 1;
+      const file = input.file_path || input.notebook_path;
+      if (kind === 'typing') touchFile(s, file, 'edit', ts);
+      else if (u.name === 'Read') touchFile(s, file, 'read', ts);
+      if (u !== tool) pushLog(s, describeTool(u.name, input), ts, live); // 한 번에 여러 도구를 부른 경우
+    }
     if (tool) {
       s.state = classifyTool(tool.name);
       s.detail = describeTool(tool.name, tool.input);
       s.tools++;
-      if (live) pushLog(s, s.detail);
+      pushLog(s, s.detail, ts, live);
     } else if (e.message.stop_reason === 'end_turn') {
       s.state = 'idle';
       s.detail = '작업 완료 — 다음 요청 대기';
-      if (live) pushLog(s, '✔ 턴 종료');
+      pushLog(s, '✔ 턴 종료', ts, live);
     } else {
       s.state = 'thinking';
       s.detail = '생각 중…';
     }
+    // 훅이 승인 대기라고 알려 줬으면, 사용자가 답하기(tool_result) 전까지는 대기로 둔다
+    if (s.hookWait) { s.state = 'waiting'; s.detail = s.waitDetail; }
   }
   if (e.type === 'user' && e.message) {
     s.lastEvent = ts;
     const c = e.message.content;
     const isToolResult = Array.isArray(c) && c.some((x) => x.type === 'tool_result');
+    s.hookWait = false;
     s.state = 'thinking';
     s.detail = isToolResult ? '결과 확인 중…' : '새 요청을 받음';
-    if (!isToolResult && live) pushLog(s, '✉ 사용자 요청');
+    if (!isToolResult && !e.isMeta) {
+      const text = promptText(c);
+      setPrompt(s, text, ts);
+      if (text) pushLog(s, '✉ 사용자 요청', ts, live);
+    }
   }
 }
 
@@ -154,15 +206,17 @@ function codexTitle(s) {
 function applyCodex(s, e, live) {
   const ts = e.timestamp ? Date.parse(e.timestamp) : Date.now();
   const p = e.payload || {};
-  if (e.type === 'session_meta' && p.cwd) s.project = path.basename(p.cwd).slice(-32);
-  if (e.type === 'turn_context' && p.cwd) s.project = path.basename(p.cwd).slice(-32);
+  if ((e.type === 'session_meta' || e.type === 'turn_context') && p.cwd) { s.cwd = p.cwd; s.project = path.basename(p.cwd).slice(-32); }
   if (e.type === 'response_item' && /call$/.test(p.type || '')) {
     const name = p.name || p.type.replace(/_call$/, '');
     const text = typeof p.input === 'string' ? p.input : typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.action || p.input || {});
     s.lastEvent = ts; s.tools++;
     s.state = classifyCodex(name, text);
     s.detail = describeCodex(name, text);
-    if (live) pushLog(s, s.detail);
+    s.byState[s.state] = (s.byState[s.state] || 0) + 1;
+    // apply_patch 본문의 "*** Update File: 경로" 줄에서 고친 파일을 뽑는다
+    for (const m of text.matchAll(/\*\*\* (?:Add|Update|Delete) File: ([^\n"\\]+)/g)) touchFile(s, path.resolve(s.cwd || '/', m[1].trim()), 'edit', ts);
+    pushLog(s, s.detail, ts, live);
   }
   if (e.type === 'response_item' && /call_output$/.test(p.type || '')) {
     s.lastEvent = ts; s.state = 'thinking'; s.detail = '결과 확인 중…';
@@ -176,8 +230,8 @@ function applyCodex(s, e, live) {
   switch (p.type) {
     case 'user_message':
       s.lastEvent = ts; s.state = 'thinking'; s.detail = '새 요청을 받음';
-      if (!s.firstMessage && p.message) s.firstMessage = cleanCodexText(p.message);
-      if (live) pushLog(s, '✉ 사용자 요청');
+      if (p.message) setPrompt(s, cleanCodexText(p.message).slice(0, 400), ts);
+      pushLog(s, '✉ 사용자 요청', ts, live);
       break;
     case 'task_started':
       s.lastEvent = ts; s.state = 'thinking'; s.detail = '생각 중…';
@@ -188,18 +242,19 @@ function applyCodex(s, e, live) {
     case 'task_complete':
     case 'turn_aborted':
       s.lastEvent = ts; s.state = 'idle'; s.detail = '작업 완료 — 다음 요청 대기';
-      if (live) pushLog(s, '✔ 턴 종료');
+      pushLog(s, '✔ 턴 종료', ts, live);
       break;
     default:
       // Codex는 승인 요청을 명시적으로 기록하므로 추정 없이 정확하게 알 수 있다
       if (/approval_request/.test(p.type || '')) {
         s.lastEvent = ts; s.state = 'waiting'; s.detail = '사용자 승인 대기 중';
-        if (live) pushLog(s, '❗ 승인 요청');
+        pushLog(s, '❗ 승인 요청', ts, live);
       }
   }
 }
 
 // 처음 발견한 파일은 끝부분만 읽으므로, 앞부분의 도구 사용 횟수는 따로 세어 둔다 (칭호가 서버 재시작에 흔들리지 않게)
+// 사용자 요청(첫 요청·최근 요청)도 앞부분에 있을 수 있어 함께 줍는다
 const HEAD_COUNT_LIMIT = 64 * 1024 * 1024;
 function countHeadTools(file, end, s) {
   const limit = Math.min(end, HEAD_COUNT_LIMIT);
@@ -208,9 +263,20 @@ function countHeadTools(file, end, s) {
   let pos = 0, rest = '', n = 0;
   const countLine = (line) => {
     if (s.agent === 'codex') {
+      if (line.includes('"user_message"')) {
+        try { const e = JSON.parse(line); if (e.payload?.type === 'user_message' && e.payload.message) setPrompt(s, cleanCodexText(e.payload.message).slice(0, 400), Date.parse(e.timestamp) || 0); } catch { /* 잘린 줄 */ }
+        return;
+      }
       if (!line.includes('_call"')) return;
       try { const e = JSON.parse(line); if (e.type === 'response_item' && /call$/.test(e.payload?.type || '')) n++; } catch { /* 잘린 줄 */ }
     } else {
+      if (line.includes('"type":"user"') && !line.includes('"tool_result"')) {
+        try {
+          const e = JSON.parse(line);
+          if (e.type === 'user' && !e.isMeta && (s.isSub || !e.sessionId || e.sessionId === s.ownId)) setPrompt(s, promptText(e.message?.content), Date.parse(e.timestamp) || 0);
+        } catch { /* 잘린 줄 */ }
+        return;
+      }
       if (!line.includes('"tool_use"')) return;
       try {
         const e = JSON.parse(line);
@@ -286,24 +352,93 @@ function listCodexJsonl() {
   return out;
 }
 
+function viewOf(s, now = Date.now()) {
+  let state = s.state;
+  const quiet = now - s.lastEvent;
+  // 도구 호출 후 한참 응답이 없으면 권한 승인 등을 기다리는 중일 가능성이 큼
+  // Claude는 승인 대기가 기록되지 않아 침묵 시간으로 추정(훅을 연결한 세션은 훅이 알려 줌), Codex는 명시적 이벤트 사용
+  if (s.agent === 'claude' && !s.hooked && state !== 'idle' && state !== 'thinking' && quiet > 45_000) state = 'waiting';
+  if (state === 'thinking' && quiet > 120_000) state = 'idle';
+  return { id: s.id, agent: s.agent, title: s.agent === 'codex' ? codexTitle(s) : s.title, project: s.project, isSub: s.isSub, state, detail: s.detail,
+    lastEvent: s.lastEvent, tools: s.tools, log: s.log,
+    waitExact: state === 'waiting' && (s.agent === 'codex' || s.hookWait), hooked: s.hooked };
+}
+
 function snapshot() {
   const now = Date.now();
   return [...sessions.values()]
     .filter((s) => s.lastEvent && now - s.lastEvent < ACTIVE_WINDOW_MS) // 자기 활동이 최근에 있는 세션만
-    .map((s) => {
-      let state = s.state;
-      const quiet = now - s.lastEvent;
-      // 도구 호출 후 한참 응답이 없으면 권한 승인 등을 기다리는 중일 가능성이 큼
-      // Claude는 승인 대기가 기록되지 않아 침묵 시간으로 추정, Codex는 명시적 이벤트 사용
-      if (s.agent === 'claude' && state !== 'idle' && state !== 'thinking' && quiet > 45_000) state = 'waiting';
-      if (state === 'thinking' && quiet > 120_000) state = 'idle';
-      return { id: s.id, agent: s.agent, title: s.agent === 'codex' ? codexTitle(s) : s.title, project: s.project, isSub: s.isSub, state, detail: s.detail,
-        lastEvent: s.lastEvent, tools: s.tools, log: s.log };
-    })
+    .map((s) => viewOf(s, now))
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
+// 상세 패널: 클릭한 세션의 긴 기록. 파일 경로는 작업 폴더 기준 상대 경로(밖이면 ~로 줄임)로 보낸다
+function shortPath(s, file) {
+  if (s.cwd && file.startsWith(s.cwd.replace(/[\\/]+$/, '') + path.sep)) return path.relative(s.cwd, file);
+  const home = os.homedir();
+  return file.startsWith(home + path.sep) ? '~' + file.slice(home.length) : file;
+}
+function detailOf(s) {
+  return { ...viewOf(s), startedAt: s.startedAt, firstMessage: s.firstMessage, lastPrompt: s.lastPrompt, byState: s.byState,
+    files: [...s.files.values()].reverse().map((f) => ({ ...f, path: shortPath(s, f.path) })),
+    history: s.history.slice().reverse() };
+}
+
 let lastSent = '';
+function broadcast() {
+  const data = JSON.stringify(snapshot());
+  if (data !== lastSent) {
+    lastSent = data;
+    io.emit('agents', JSON.parse(data));
+  }
+}
+
+// ---------- Claude Code 훅 ----------
+// 승인 대기는 기록(JSONL)에 남지 않으므로, 훅(Notification·PermissionRequest 등)이 보내 주는 이벤트로 정확히 안다.
+// 훅 설정은 `npm run hook-config` 가 만들어 준다.
+function isPermissionEvent(h) {
+  const ev = String(h.hook_event_name || ''), nt = String(h.notification_type || '');
+  if (ev === 'PermissionRequest') return true;
+  if (ev !== 'Notification') return false;
+  if (nt) return nt === 'permission_prompt' || nt === 'elicitation_dialog';
+  return /permission/i.test(String(h.message || '')); // notification_type이 없는 예전 버전
+}
+
+function applyHook(h) {
+  const tp = typeof h?.transcript_path === 'string' ? path.resolve(h.transcript_path) : '';
+  if (!tp.startsWith(ROOT + path.sep) || !tp.endsWith('.jsonl')) return false; // 세션 기록 폴더 밖은 읽지 않는다
+  let s = sessions.get(tp);
+  if (!s) {
+    if (!fs.existsSync(tp)) return false;
+    s = newSession(tp, 'claude'); sessions.set(tp, s); readNew(tp, s, false);
+  } else readNew(tp, s, true); // 훅보다 늦게 읽힌 기록 줄이 대기 상태를 덮어쓰지 않게 먼저 따라잡는다
+  s.hooked = true;
+  const now = Date.now(), ev = String(h.hook_event_name || '');
+  if (isPermissionEvent(h)) {
+    const tool = typeof h.tool_name === 'string' ? h.tool_name.replace(/^mcp__.+?__/, '') : '';
+    const msg = String(h.message || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const text = msg || (tool ? `${tool} 승인 요청` : '사용자 승인 대기 중');
+    if (!s.hookWait) pushLog(s, `❗ ${text}`, now, true);
+    s.hookWait = true; s.waitDetail = text;
+    s.state = 'waiting'; s.detail = text; s.lastEvent = now;
+  } else if (['PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop', 'SessionEnd'].includes(ev) && s.hookWait) {
+    s.hookWait = false;
+    if (s.state === 'waiting') { s.state = 'thinking'; s.detail = '결과 확인 중…'; }
+  }
+  broadcast();
+  return true;
+}
+
+// 훅 요청은 data/hook-token 의 비밀값을 함께 보내야 받는다 (외부 공개 시 아무나 상태를 조작하지 못하게)
+function loadHookToken(dir) {
+  if (process.env.HOOK_TOKEN) return process.env.HOOK_TOKEN;
+  const file = path.join(dir, 'hook-token');
+  try { const t = fs.readFileSync(file, 'utf8').trim(); if (t) return t; } catch { /* 처음 실행 */ }
+  const t = crypto.randomBytes(24).toString('hex');
+  try { fs.writeFileSync(file, t + '\n', { mode: 0o600 }); } catch { /* 저장 못 해도 이번 실행에서는 동작 */ }
+  return t;
+}
+
 function tick() {
   const now = Date.now();
   loadCodexNames();
@@ -322,11 +457,7 @@ function tick() {
     try { mtime = fs.statSync(file).mtimeMs; } catch { /* 삭제됨 */ }
     if (!mtime || now - mtime > ACTIVE_WINDOW_MS) sessions.delete(file);
   }
-  const data = JSON.stringify(snapshot());
-  if (data !== lastSent) {
-    lastSent = data;
-    io.emit('agents', JSON.parse(data));
-  }
+  broadcast();
 }
 
 // ---------- 저장소: SQLite ----------
@@ -337,6 +468,7 @@ const { Server } = require('socket.io');
 const DATA_DIR = path.join(__dirname, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new Database(path.join(DATA_DIR, 'office.db'));
+const HOOK_TOKEN = loadHookToken(DATA_DIR);
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -444,7 +576,16 @@ function readJson(req, limit = 4096) {
 const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
 
 // 로그인 관련 요청만 HTTP로 받는다 (쿠키를 심어야 하므로). 이동·채팅은 socket.io로.
+const sameSecret = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
+
 async function handleApi(req, res, pathname) {
+  if (pathname === '/api/hook') {
+    if (req.method !== 'POST') return json(res, 405, { error: 'POST만 가능' });
+    if (!sameSecret(req.headers['x-hook-token'] || '', HOOK_TOKEN)) return json(res, 403, { error: '훅 토큰이 맞지 않아요' });
+    let body;
+    try { body = await readJson(req, 1024 * 1024); } catch { return json(res, 400, { error: '잘못된 요청' }); }
+    return json(res, 200, { ok: applyHook(body) });
+  }
   const user = userFromCookie(req.headers.cookie);
   if (pathname === '/api/me') return json(res, 200, { name: user ? user.name : null });
   if (pathname === '/api/avatar' && req.method === 'POST') {
@@ -568,6 +709,13 @@ io.on('connection', (socket) => {
   }
   // Idle connections must also lose access when their session expires.
   const authTimer = user ? setInterval(authenticated, 1000) : null;
+
+  // 상세 패널: 클릭한 에이전트의 긴 기록을 요청할 때만 보낸다
+  socket.on('agentDetail', (id, ack) => {
+    if (typeof ack !== 'function') return;
+    const s = typeof id === 'string' && sessions.get(id);
+    ack(s && s.lastEvent ? detailOf(s) : null);
+  });
 
   socket.on('move', (m) => {
     if (!authenticated() || !m || !ROOMS.includes(m.room)) return;
