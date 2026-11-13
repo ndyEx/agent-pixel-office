@@ -319,15 +319,8 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
       floorTiles(g, '#2f4a4a', '#2b4545', true);
       wall(g, room.wall);
       box(g, 70, 3, 100, 17, '#b8bccc', { top: 0, bottom: 0 }); R(g, 72, 5, 96, 13, '#f4f6fa');
-      // 화이트보드 낙서: 상자와 화살표 다이어그램
-      for (const [bx, by, c] of [[76, 7, '#61afef'], [100, 7, '#98c379'], [124, 11, '#e06c75']]) {
-        R(g, bx, by, 14, 1, c); R(g, bx, by + 5, 14, 1, c); R(g, bx, by, 1, 6, c); R(g, bx + 13, by, 1, 6, c);
-        R(g, bx + 3, by + 2, 8, 1, '#8a8fa3'); R(g, bx + 3, by + 3, 5, 1, '#8a8fa3');
-      }
-      R(g, 91, 9, 8, 1, '#3c4160'); R(g, 98, 8, 1, 3, '#3c4160');
-      R(g, 115, 11, 8, 1, '#3c4160'); R(g, 122, 10, 1, 3, '#3c4160');
-      R(g, 144, 7, 20, 1, '#c678dd'); R(g, 144, 10, 16, 1, '#c678dd'); R(g, 144, 13, 18, 1, '#c678dd');
-      R(g, 74, 18, 96, 2, '#8a8fa3'); R(g, 80, 17, 6, 1, '#e06c75'); R(g, 88, 17, 6, 1, '#61afef');
+      // 화이트보드 안은 오늘의 통계가 매 프레임 채운다 (statsBoard). 여기서는 받침대와 마커만
+      R(g, 74, 18, 96, 2, '#8a8fa3'); R(g, 150, 18, 6, 1, '#e06c75'); R(g, 158, 18, 6, 1, '#61afef');
       for (let c = 0; c < 5; c++) chair(g, 68 + c * 22, 55, true);
       table(g, 60, 62, 120, 32, '#6e4a2e');
       g.globalAlpha = 0.12; R(g, 64, 64, 112, 2, '#ffffff'); g.globalAlpha = 1;
@@ -357,6 +350,26 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
   const chance = (rate, dt) => Math.random() < rate * dt;
 
   const lights = [];
+
+  // ---------- 회의실 화이트보드: 오늘 시간대별 도구 사용 막대 ----------
+  // 흰 판 안쪽은 x 72~167, y 5~17. 위쪽 5줄은 글씨(office.js의 글씨 레이어), 아래쪽에 24시간 막대를 그린다.
+  const BOARD = { x: 70, y: 3, w: 100, h: 17 }; // 바깥 틀 (office.js가 마우스를 올렸는지 볼 때도 쓴다)
+  const BAR = { claude: '#d97757', codex: '#3b4252', base: 16, max: 6, x0: 73 };
+  function statsBoard(g, snap) {
+    R(g, BAR.x0, BAR.base, 95, 1, '#d4d8e4'); // 바닥선
+    const day = snap?.days?.[snap.days.length - 1];
+    if (!day) return;
+    const total = day.hours.claude.map((c, i) => c + day.hours.codex[i]);
+    const peak = Math.max(1, ...total);
+    for (let i = 0; i < 24; i++) {
+      if (!total[i]) continue;
+      const h = Math.max(1, Math.round((total[i] / peak) * BAR.max));
+      const cx = Math.round((day.hours.codex[i] / total[i]) * h);
+      R(g, BAR.x0 + i * 4, BAR.base - h, 3, h - cx, BAR.claude);        // 위: Claude
+      R(g, BAR.x0 + i * 4, BAR.base - cx, 3, cx, BAR.codex);            // 아래: Codex
+    }
+    R(g, BAR.x0 + new Date().getHours() * 4, BAR.base + 1, 3, 1, '#e5c07b'); // 지금 시각 표시
+  }
 
   // ---------- 매 프레임: 캐릭터 아래에 그릴 것 ----------
   function drawBase(g, roomId, t, dt, sk, info = {}) {
@@ -405,6 +418,7 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
       if (chance(1.8, dt)) emit(125 + Math.random(), 73, { room: roomId });
     } else {
       winXs = [186];
+      statsBoard(g, info.stats);
       windowPane(g, 186, t, 5, sk);
       clock(g, 40, 11, t);
       for (let c = 0; c < 3; c++) { // 노트북
@@ -458,5 +472,5 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
     void roomId;
   }
 
-  return { sky, drawBase, drawOver, emit, sofaBackPiece };
+  return { sky, drawBase, drawOver, emit, sofaBackPiece, BOARD };
 };

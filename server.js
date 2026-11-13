@@ -151,14 +151,23 @@ function codexTitle(s) {
   return 'Codex 세션';
 }
 
+// Codex *_call 기록에서 도구 이름과 인자 문자열을 꺼낸다 (상태 표시와 일일 통계가 같이 쓴다)
+function codexCallParts(p) {
+  const name = p.name || p.type.replace(/_call$/, '');
+  const text = typeof p.input === 'string' ? p.input : typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.action || p.input || {});
+  return { name, text };
+}
+
 function applyCodex(s, e, live) {
   const ts = e.timestamp ? Date.parse(e.timestamp) : Date.now();
   const p = e.payload || {};
   if (e.type === 'session_meta' && p.cwd) s.project = path.basename(p.cwd).slice(-32);
   if (e.type === 'turn_context' && p.cwd) s.project = path.basename(p.cwd).slice(-32);
+  // 다른 에이전트 대화를 가져온 턴(turn_id: external-import-…)은 Codex가 한 일이 아니다 (포크 복사본과 같은 취급)
+  if (e.type === 'event_msg' && p.type === 'task_started') s.importing = String(p.turn_id || '').startsWith('external-import');
+  if (s.importing) return;
   if (e.type === 'response_item' && /call$/.test(p.type || '')) {
-    const name = p.name || p.type.replace(/_call$/, '');
-    const text = typeof p.input === 'string' ? p.input : typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.action || p.input || {});
+    const { name, text } = codexCallParts(p);
     s.lastEvent = ts; s.tools++;
     s.state = classifyCodex(name, text);
     s.detail = describeCodex(name, text);
@@ -275,10 +284,10 @@ function listJsonl() {
   return out;
 }
 
-// Codex 세션: 날짜별 폴더 중 최근 이틀치만 본다
-function listCodexJsonl() {
+// Codex 세션: 날짜별 폴더 중 최근 며칠치만 본다 (상태 표시는 이틀, 통계는 더 길게)
+function listCodexJsonl(days = 2) {
   const out = [];
-  for (const back of [0, 1]) {
+  for (let back = 0; back < days; back++) {
     const d = new Date(Date.now() - back * 86400000);
     const dir = path.join(CODEX_ROOT, String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
     try { for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) out.push(path.join(dir, f)); } catch { /* 없음 */ }
@@ -301,6 +310,27 @@ function snapshot() {
         lastEvent: s.lastEvent, tools: s.tools, log: s.log };
     })
     .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// ---------- 일일 통계 ----------
+const { createStats } = require(path.join(__dirname, 'stats.js'));
+const STATS_DAYS = 7;
+const stats = createStats({
+  keepDays: STATS_DAYS,
+  classifyClaude: classifyTool,
+  classifyCodexCall: (p) => { const { name, text } = codexCallParts(p); return classifyCodex(name, text); },
+  listFiles: () => [
+    ...listJsonl().map((f) => ({ path: f, agent: 'claude', isSub: f.includes(`${path.sep}subagents${path.sep}`) })),
+    ...listCodexJsonl(STATS_DAYS + 1).map((f) => ({ path: f, agent: 'codex' })),
+  ],
+});
+let lastStats = '';
+function tickStats() {
+  try {
+    stats.update();
+    const data = JSON.stringify(stats.snapshot());
+    if (data !== lastStats) { lastStats = data; io.emit('stats', JSON.parse(data)); }
+  } catch (err) { console.error('통계 집계 오류:', err.message); } // 통계가 실패해도 에이전트 상태 표시는 계속
 }
 
 let lastSent = '';
@@ -327,6 +357,7 @@ function tick() {
     lastSent = data;
     io.emit('agents', JSON.parse(data));
   }
+  tickStats();
 }
 
 // ---------- 저장소: SQLite ----------
@@ -542,6 +573,7 @@ io.on('connection', (socket) => {
   // 소켓 연결 때 브라우저가 보낸 쿠키로 로그인 사용자를 알아낸다
   const user = userFromCookie(socket.handshake.headers.cookie);
   socket.emit('agents', snapshot());
+  if (lastStats) socket.emit('stats', JSON.parse(lastStats));
   socket.emit('history', history());
   socket.emit('avatars', avatarMap());
   if (user) {
