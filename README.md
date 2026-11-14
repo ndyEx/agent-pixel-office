@@ -46,8 +46,8 @@ npm run hook-config    # ~/.claude/settings.json 에 넣을 hooks 블록을 출�
 에이전트에 직접 붙지 않고, 에이전트가 남기는 **세션 기록(JSONL)** 을 옆에서 읽습니다.
 
 ```
-에이전트가 도구 사용 → 세션 기록에 한 줄 추가 → server.js가 1초마다 새 줄만 읽어 상태 판단
-→ socket.io(WebSocket)로 브라우저에 전송 → office.js가 캐릭터를 목표 위치로 이동시키며 렌더링
+에이전트가 도구 사용 → 세션 기록에 한 줄 추가 → 서버(server/agents)가 1초마다 새 줄만 읽어 상태 판단
+→ socket.io(WebSocket)로 브라우저에 전송 → 화면(public/js)이 캐릭터를 목표 위치로 이동시키며 렌더링
 ```
 
 | 에이전트 | 읽는 위치 |
@@ -98,14 +98,13 @@ Codex 캐릭터는 검은 캡모자, Claude 캐릭터는 주황 배지를 달고
 ## 구조
 
 ```
-server.js          세션 기록 감시 + 상태 판단 + 로그인 API + socket.io 서버 + SQLite 저장
-stats.js           일일 통계 집계 (기록 파일을 이어 읽으며 날짜별로 센다)
-public/index.html  레이아웃, 방 탭, 로그인·채팅·통계·세션 목록 패널
-public/office.js   Canvas 픽셀아트 방·캐릭터 렌더링, 방향키 이동, 채팅, 화이트보드 글씨·카드
-public/stats-ui.js 통계 요약 계산 + 페이지의 통계 카드
-hooks/claude-hook.sh   Claude Code 훅 → /api/hook 전달
-scripts/hook-config.js settings.json 에 넣을 훅 설정 출력
-test/              세션 서버·통계 집계 테스트 (npm test)
-data/office.db     계정·로그인 토큰·채팅 (git에 올라가지 않음)
-data/hook-token    훅 요청용 비밀값 (git에 올라가지 않음)
+server.js        서버 진입점 (server/app.js 가 부품을 조립)
+server/          서버: 세션 기록 감시(agents/), 통계, 로그인, DB, HTTP, socket.io
+public/          화면: index.html, css/style.css, js/ (main.js가 시작점)
+hooks/           Claude Code 훅 스크립트
+scripts/         보조 명령 (npm run hook-config)
+test/            테스트 (npm test)
+data/            계정·채팅 DB, 훅 토큰 (git에 올라가지 않음)
 ```
+
+파일별 역할, 데이터 흐름, "이걸 바꾸려면 어디를 고치나"는 **[ARCHITECTURE.md](ARCHITECTURE.md)** 에 정리돼 있습니다.

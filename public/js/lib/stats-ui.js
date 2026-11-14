@@ -1,6 +1,6 @@
 // 일일 통계 화면: 서버가 보낸 집계(snap)를 숫자 요약으로 바꾸고, 페이지의 통계 카드를 그린다.
-// 회의실 화이트보드(scenery.js)와 마우스를 올렸을 때 뜨는 카드(office.js)도 같은 요약을 쓴다.
-window.StatsUI = (function () {
+// 회의실 화이트보드(scenery.js)와 마우스를 올렸을 때 뜨는 카드(draw/whiteboard.js)도 같은 요약을 쓴다.
+export const StatsUI = (function () {
   // 도구 유형: 에이전트 상태 색과 같은 색을 써서 화면 속 행동과 짝을 맞춘다
   const CATS = [
     { id: 'typing', label: '타이핑', color: '#7bd88f' },

@@ -2,7 +2,7 @@
 // 문자열 도트맵(한 글자 = 한 픽셀)을 팔레트로 칠하고, 조합마다 오프스크린 캔버스에 캐시한다.
 // 방향: down(정면) / up(뒷모습) / side(오른쪽, 왼쪽은 그릴 때 좌우 반전)
 // 프레임: 걷기 4단계(서기 → 왼발 → 서기 → 오른발), 눈 깜빡임, 타이핑 팔 움직임
-(function () {
+export const Sprites = (function () {
   const PX = 4;          // 도트 1개 = 화면 4px (월드 1칸과 같음)
   const W = 10, H = 17;  // 스프라이트 크기 (도트)
 
@@ -262,5 +262,5 @@
   };
   const layout = (kind) => (kind === 'claude' ? LAYOUT.claude : LAYOUT.human);
 
-  window.Sprites = { W, H, PX, get, shade, mix, layout, baseRows };
+  return { W, H, PX, get, shade, mix, layout, baseRows };
 })();

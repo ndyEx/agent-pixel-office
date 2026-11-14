@@ -2,8 +2,10 @@
 // - 움직이지 않는 부분(바닥, 벽, 가구 본체)은 방마다 오프스크린 캔버스에 한 번만 그려 둔다.
 // - 움직이는 부분(창밖 하늘·구름, 시계, LED, TV, 화분, 모니터, 탁구공)은 매 프레임 그린다.
 // - 김·먼지 파티클, 밤 색조, 조명 빛번짐, 비네팅은 캐릭터 위에 덧그린다.
-window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
-  const { shade, mix } = window.Sprites;
+import { Sprites } from './sprites.js';
+
+export function createScenery({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
+  const { shade, mix } = Sprites;
   const WW = 240, WH = 150;
 
   // ---------- 그리기 도구 (월드 좌표) ----------
@@ -78,7 +80,7 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
     R(g, mx, DOOR_Y0 + 4, 12, DOOR_Y1 - DOOR_Y0 - 8, '#4a3322');
     R(g, mx + 1, DOOR_Y0 + 5, 10, DOOR_Y1 - DOOR_Y0 - 10, '#6e4c33');
     for (let k = DOOR_Y0 + 7; k < DOOR_Y1 - 6; k += 3) R(g, mx + 2, k, 8, 1, '#5c3f2a');
-    // 이름표 글씨는 선명하게 보이도록 office.js의 글씨 레이어에서 그린다
+    // 이름표 글씨는 선명하게 보이도록 draw/labels.js의 글씨 레이어에서 그린다
   }
 
   // ---------- 소품 ----------
@@ -123,7 +125,7 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
   // 아래쪽 소파에 앉은 캐릭터 위로 덧그릴 등받이 한 칸 (seatX: 좌석 가운데, y: 등받이 윗변)
   function sofaBackPiece(g, seatX, y) { box(g, seatX - 8, y, 16, 7, shade(LOUNGE_SOFA, 0.06)); }
   // 위를 보는 소파(뒷모습): 방석이 위, 등받이가 아래(화면 앞쪽). y = 방석 윗변
-  // 앉은 캐릭터의 허리는 office.js가 등받이 조각을 덧그려 가린다 (sofaBackPiece와 같은 색)
+  // 앉은 캐릭터의 허리는 draw/characters.js가 등받이 조각을 덧그려 가린다 (sofaBackPiece와 같은 색)
   function sofaUp(g, x, y, w, c, seats) {
     shadow(g, x, y + 15, w + 2, 2);
     box(g, x, y, w, 9, c);
@@ -352,8 +354,8 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
   const lights = [];
 
   // ---------- 회의실 화이트보드: 오늘 시간대별 도구 사용 막대 ----------
-  // 흰 판 안쪽은 x 72~167, y 5~17. 위쪽 5줄은 글씨(office.js의 글씨 레이어), 아래쪽에 24시간 막대를 그린다.
-  const BOARD = { x: 70, y: 3, w: 100, h: 17 }; // 바깥 틀 (office.js가 마우스를 올렸는지 볼 때도 쓴다)
+  // 흰 판 안쪽은 x 72~167, y 5~17. 위쪽 5줄은 글씨(draw/whiteboard.js), 아래쪽에 24시간 막대를 그린다.
+  const BOARD = { x: 70, y: 3, w: 100, h: 17 }; // 바깥 틀 (draw/whiteboard.js가 마우스를 올렸는지 볼 때도 쓴다)
   const BAR = { claude: '#d97757', codex: '#3b4252', base: 16, max: 6, x0: 73 };
   function statsBoard(g, snap) {
     R(g, BAR.x0, BAR.base, 95, 1, '#d4d8e4'); // 바닥선
@@ -473,4 +475,4 @@ window.createScenery = function ({ S, DESKS, ROOM_BY_ID, DOOR_Y0, DOOR_Y1 }) {
   }
 
   return { sky, drawBase, drawOver, emit, sofaBackPiece, BOARD };
-};
+}

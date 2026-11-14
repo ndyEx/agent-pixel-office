@@ -1,7 +1,9 @@
 // 내 도트 캐릭터 편집기
 // 정면·뒷모습·옆모습의 머리·몸(10x12칸)을 한 칸씩 칠한다. 다리는 바지 색으로 자동으로 붙어 걷기·앉기가 그대로 움직인다.
-// 저장 형식은 server.js의 cleanAvatar와 같다: { v, palette: [최대 16색], pants, views: { down|up|side: 12줄 } }
-(function () {
+// 저장 형식은 server/avatar.js의 cleanAvatar와 같다: { v, palette: [최대 16색], pants, views: { down|up|side: 12줄 } }
+import { Sprites } from './sprites.js';
+
+export const AvatarEditor = (function () {
   const COLS = 10, ROWS = 12, LEG_ROWS = 5, CELL = 22;
   const DIRS = [['down', '정면'], ['up', '뒷모습'], ['side', '옆모습(→)']];
   const BASIC = ['#1a1b26', '#ffffff', '#f1c27d', '#e0ac69', '#c68642', '#3b2a20', '#d8b45c', '#a0522d',
@@ -297,5 +299,5 @@
     st.raf = requestAnimationFrame(drawPreview);
   }
 
-  window.AvatarEditor = { open, close };
+  return { open, close };
 })();

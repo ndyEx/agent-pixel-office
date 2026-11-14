@@ -1,37 +1,26 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const vm = require('node:vm');
 const { once } = require('node:events');
-const Database = require('better-sqlite3');
 const WebSocket = require('ws');
+const { loadConfig } = require('../server/config');
+const { createApp } = require('../server/app');
 
 const root = path.resolve(__dirname, '..');
 
-// Run the actual HTTP/Socket.IO handlers with an isolated, in-memory SQLite DB.
-async function startServer(t, { home = path.join(root, 'test', 'no-home') } = {}) {
-  const timers = new Set();
-  const context = vm.createContext({
-    __dirname: root, Buffer, URL, console: { log() {} },
-    process: { env: { PORT: '0', HOST: '127.0.0.1', CODEX_SESSIONS: path.join(root, 'test', 'no-sessions'), HOOK_TOKEN: 'test-hook-token' } },
-    setInterval(fn, ms) { const timer = setInterval(fn, ms); timers.add(timer); return timer; },
-    clearInterval,
-    require(name) {
-      if (name === 'better-sqlite3') return function () { return new Database(':memory:'); };
-      if (name === 'fs') return { ...fs, mkdirSync() {}, existsSync() { return false; } };
-      if (name === 'os') return { homedir: () => home };
-      return require(name);
-    },
-  });
-  vm.runInContext(fs.readFileSync(path.join(root, 'server.js'), 'utf8'), context);
-  const app = vm.runInContext('({ server, io, db })', context);
-  t.after(async () => {
-    for (const timer of timers) clearInterval(timer);
-    await new Promise(resolve => app.io.close(resolve));
-    app.db.close();
-  });
-  await once(app.server, 'listening');
+// 실제 서버(HTTP + socket.io)를 임시 폴더와 메모리 DB로 띄운다
+async function startServer(t, { home } = {}) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'po-data-'));
+  home ||= path.join(dataDir, 'home'); // 세션 기록이 없는 빈 홈
+  const config = {
+    ...loadConfig({ CODEX_SESSIONS: path.join(dataDir, 'no-codex') }, home),
+    port: 0, host: '127.0.0.1', dataDir, dbFile: ':memory:', hookToken: 'test-hook-token', quiet: true,
+  };
+  const app = createApp(config);
+  t.after(async () => { await app.stop(); fs.rmSync(dataDir, { recursive: true, force: true }); });
+  await app.start();
   app.url = `http://127.0.0.1:${app.server.address().port}`;
   return app;
 }
@@ -133,20 +122,47 @@ test('session and multi-tab regressions', async t => {
   });
 });
 
-test('other-tab movement updates the local view and clears pending movement', () => {
-  const source = fs.readFileSync(path.join(root, 'public', 'office.js'), 'utf8');
-  const helper = source.slice(source.indexOf('function syncOwnPosition'), source.indexOf('function syncPeople'));
-  const context = vm.createContext({ me: { name: 'tester', room: 'office', placed: true, act: {} },
-    dirtyMove: true, keys: new Set(['ArrowRight']), resetJoy() {}, viewRoom: 'office',
-    unread: { lounge: 3 }, renderChat() {}, renderTabs() {} });
-  vm.runInContext(helper, context);
-  context.syncOwnPosition({ name: 'tester', room: 'lounge', x: 14, y: 86, act: null });
-  assert.equal(context.me.room, 'lounge');
-  assert.equal(context.viewRoom, 'lounge');
-  assert.equal(context.me.act, null);
-  assert.equal(context.dirtyMove, false);
-  assert.equal(context.keys.size, 0);
-  assert.equal(context.unread.lounge, 0);
+test('other-tab movement updates the local view and clears pending movement', async () => {
+  // 화면 모듈(public/js)을 Node에서 불러오기 위한 최소한의 브라우저 흉내.
+  // 어떤 속성을 읽거나 불러도 다시 가짜 요소를 돌려주므로, DOM을 건드리는 코드가 그냥 지나간다.
+  const fakeEl = () => new Proxy(function () {}, {
+    get: (_, k) => (k === Symbol.toPrimitive ? () => '' : fakeEl()), set: () => true, apply: () => fakeEl(),
+  });
+  const handlers = {};
+  Object.assign(globalThis, {
+    document: { getElementById: () => fakeEl(), body: fakeEl() },
+    addEventListener: (type, fn) => { handlers[type] = fn; },
+    matchMedia: () => ({ matches: false }),
+  });
+  const { pathToFileURL } = require('node:url');
+  const load = (f) => import(pathToFileURL(path.join(root, 'public', 'js', f)).href);
+  const { state, unread } = await load('state.js');
+  const players = await load('players.js');
+  players.initPlayers();
+
+  const sent = [];
+  state.socket = { emit: (ev) => sent.push(ev) };
+  state.me = { name: 'tester', room: 'office', x: 180, y: 140, placed: true, act: null };
+  unread.lounge = 3;
+
+  // 오른쪽 키를 누른 채 두 번 움직인다: 첫 번째는 바로 보내고, 두 번째는 0.05초 간격 제한에 걸려 보낼 거리로 남는다
+  handlers.keydown({ key: 'ArrowRight', target: { tagName: 'CANVAS' }, preventDefault() {} });
+  players.moveMe(0.016);
+  players.moveMe(0.016);
+  assert.equal(sent.length, 1);
+
+  // 다른 탭에서 라운지로 옮겼다는 알림
+  players.syncOwnPosition({ name: 'tester', room: 'lounge', x: 14, y: 86, act: null });
+  assert.equal(state.me.room, 'lounge');
+  assert.equal(state.viewRoom, 'lounge');
+  assert.equal(state.me.act, null);
+  assert.equal(unread.lounge, 0);
+
+  // 보낼 거리로 남았던 이동은 버리고, 눌려 있던 키도 놓아서 더 움직이지 않는다
+  await new Promise((r) => setTimeout(r, 60));
+  players.moveMe(0.016);
+  assert.equal(sent.length, 1, 'pending movement must be discarded');
+  assert.equal(state.me.x, 14, 'held keys must be released');
 });
 
 test('chat reset and custom avatars', async t => {

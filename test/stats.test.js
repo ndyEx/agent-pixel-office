@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createStats, dayKey } = require('../stats.js');
+const { createStats, dayKey } = require('../server/stats.js');
 
 // 서버와 같은 분류 규칙 중 테스트에 필요한 만큼
 const classifyClaude = (n) => (/^(Edit|Write)$/.test(n) ? 'typing' : /^(Read|Grep)$/.test(n) ? 'reading' : n === 'Bash' ? 'terminal' : 'working');
