@@ -1152,10 +1152,6 @@ function renderDetail() {
       : `<div class="dt-note warn">45초 넘게 응답이 없어 승인 대기로 <b>추정</b>했어요. 오래 걸리는 명령일 수도 있어요.
           ${d.agent === 'claude' ? '<br>Claude Code 훅을 연결하면 정확해져요 → <code>npm run hook-config</code>' : ''}</div>`;
   }
-  if (d.lastPrompt?.text) {
-    html += section(`최근 요청 <small>${hhmm(d.lastPrompt.t)}</small>`, `<p class="dt-prompt">${esc(d.lastPrompt.text)}</p>`);
-    if (d.firstMessage && d.firstMessage !== d.lastPrompt.text) html += section('첫 요청', `<p class="dt-prompt dim">${esc(d.firstMessage)}</p>`);
-  }
   const counts = Object.entries(d.byState || {}).filter(([, n]) => n).sort((p, q) => q[1] - p[1]);
   const total = counts.reduce((n, [, c]) => n + c, 0);
   if (total) {
@@ -1163,11 +1159,7 @@ function renderDetail() {
       `<i style="flex:${n};background:${(STATE_INFO[st] || STATE_INFO.working).color}" title="${(STATE_INFO[st] || STATE_INFO.working).label} ${n}회"></i>`).join('')}</div>
       <div class="dt-legend">${counts.map(([st, n]) => `<span><i style="background:${(STATE_INFO[st] || STATE_INFO.working).color}"></i>${(STATE_INFO[st] || STATE_INFO.working).label} ${n}</span>`).join('')}</div>`);
   }
-  if (d.files?.length) {
-    html += section(`만진 파일 <small>${d.files.length}개</small>`, `<ul class="dt-files">${d.files.map((f) =>
-      `<li title="${esc(f.path)}"><span class="ico">${f.edits ? '✏️' : '📖'}</span><span class="path">${esc(f.path)}</span>
-        <span class="cnt">${[f.edits && `수정 ${f.edits}`, f.reads && `읽기 ${f.reads}`].filter(Boolean).join(' · ')}</span></li>`).join('')}</ul>`);
-  }
+  html += '<div class="dt-note">🔒 보안을 위해 명령어·파일 이름·요청 글은 표시하지 않아요. 도구 이름과 시각만 보여요.</div>';
   if (d.history?.length) {
     html += section('타임라인', `<ol class="dt-log">${d.history.map((h) => `<li><time>${hhmmss(h.t)}</time><span>${esc(h.text)}</span></li>`).join('')}</ol>`);
   } else if (d.log?.length) {

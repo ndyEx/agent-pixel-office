@@ -238,34 +238,37 @@ test('Claude Code hooks mark exact approval waits and the detail panel reads ses
     assert.equal((await outside.json()).ok, false);
   });
 
+  const agentId = initial[0].id;
+  assert.doesNotMatch(agentId, /[\\/]|\.jsonl/, 'session id must not reveal file paths');
+
   await t.test('a permission notification turns the agent into an exact wait, and the tool result clears it', async () => {
     assert.equal((await hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt',
       message: 'Claude needs your permission to use Bash', transcript_path: file })).status, 200);
     let list = await guest.event('agents');
     assert.equal(list[0].state, 'waiting');
     assert.equal(list[0].waitExact, true);
-    assert.match(list[0].detail, /permission/);
+    assert.equal(list[0].detail, 'Bash 승인 요청');
 
     // 기록에 다른 assistant 줄이 더 붙어도 사용자가 답하기 전까지는 대기 유지
     fs.appendFileSync(file, line({ type: 'assistant', message: { content: [{ type: 'text', text: 'hmm' }] } }));
     await hook({ hook_event_name: 'Notification', notification_type: 'idle_prompt', transcript_path: file }); // 서버가 기록을 따라잡게
-    const snap = await guest.request('agentDetail', file);
-    assert.equal(snap.state, 'waiting');
+    assert.equal((await guest.request('agentDetail', agentId)).state, 'waiting');
 
     fs.appendFileSync(file, line({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }));
     await hook({ hook_event_name: 'Stop', transcript_path: file });
-    const after = await guest.request('agentDetail', file);
+    const after = await guest.request('agentDetail', agentId);
     assert.equal(after.state, 'thinking');
     assert.equal(after.waitExact, false);
   });
 
-  await t.test('agentDetail returns prompt, files and history; unknown ids return null', async () => {
-    const d = await guest.request('agentDetail', file);
-    assert.equal(d.lastPrompt.text, 'fix the login bug');
-    assert.deepEqual(d.files.map((f) => f.path), ['src/login.js']);
-    assert.equal(d.files[0].reads, 1);
-    assert.ok(d.history.some((h) => /npm test/.test(h.text)));
-    assert.ok(d.history.some((h) => /login\.js/.test(h.text)), 'parallel tool calls are all in the timeline');
-    assert.equal(await guest.request('agentDetail', '/nope.jsonl'), null);
+  await t.test('nothing sent to browsers contains commands, file paths or prompts', async () => {
+    const d = await guest.request('agentDetail', agentId);
+    const sent = JSON.stringify([d, await guest.request('agentDetail', agentId)]);
+    for (const secret of ['npm test', 'login.js', '/tmp/demo/src', 'fix the login bug', home, file])
+      assert.ok(!sent.includes(secret), `leaked: ${secret}`);
+    assert.ok(d.history.some((h) => h.text === 'Bash'), 'tool names are still shown');
+    assert.ok(d.history.some((h) => h.text === 'Read'), 'parallel tool calls are all in the timeline');
+    assert.ok(d.history.some((h) => h.text === '✉ 사용자 요청'));
+    assert.equal(await guest.request('agentDetail', file), null, 'real file paths are not accepted as ids');
   });
 });

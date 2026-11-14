@@ -26,15 +26,12 @@ function classifyTool(name = '') {
   return 'working';
 }
 
-function describeTool(name, input = {}) {
-  const short = (s, n = 60) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s);
-  if (input.description) return `${name}: ${short(input.description)}`;
-  if (input.file_path) return `${name}: ${path.basename(input.file_path)}`;
-  if (input.pattern) return `${name}: ${short(input.pattern)}`;
-  if (input.command) return `${name}: ${short(input.command)}`;
-  if (input.url) return `${name}: ${short(input.url)}`;
-  if (input.query) return `${name}: ${short(input.query)}`;
-  return name.replace(/^mcp__.+?__/, '');
+// ---------- 보안: 화면에 보내는 정보 ----------
+// 이 페이지는 외부에 공개될 수 있고 누구나 가입할 수 있으므로, 명령어·파일 경로·URL·검색어·요청 글 같은
+// 작업 내용은 서버에서 아예 만들지 않는다. 화면에는 도구 이름·상태·시각·횟수만 보낸다.
+const toolLabel = (name = '') => String(name).replace(/^mcp__.+?__/, '').slice(0, 40);
+function describeTool(name) {
+  return toolLabel(name);
 }
 
 function newSession(file, agent) {
@@ -42,10 +39,10 @@ function newSession(file, agent) {
   const project = agent === 'codex' ? '' : path.basename(path.dirname(isSub ? path.dirname(path.dirname(file)) : file));
   return {
     id: file,
+    publicId: crypto.createHash('sha256').update(file).digest('hex').slice(0, 16), // 화면용 (파일 경로·사용자 이름을 숨김)
     ownId: path.basename(file, '.jsonl'),
     agent,
     title: isSub ? 'subagent' : agent === 'codex' ? 'Codex' : path.basename(file, '.jsonl').slice(0, 8),
-    firstMessage: '',
     project: project.replace(/^-Users-[^-]+-/, '').slice(-32),
     isSub,
     state: 'idle',
@@ -56,10 +53,8 @@ function newSession(file, agent) {
     tools: 0,
     log: [],        // 목록 카드용: 서버가 지켜보는 동안 생긴 일 최근 6개
     history: [],    // 상세 패널용: 기록에 남은 시각으로 최근 HISTORY_MAX개 (처음 읽은 끝부분 포함)
-    files: new Map(), // 만진 파일: 경로 -> { path, edits, reads, t } (최근 것이 뒤)
     byState: {},    // 도구 종류별 횟수 (읽은 범위 기준)
     cwd: '',
-    lastPrompt: null, // { text, t }
     startedAt: (() => { try { return fs.statSync(file).birthtimeMs || 0; } catch { return 0; } })(),
     hooked: false,  // Claude Code 훅 이벤트를 한 번이라도 받았나 (받았으면 침묵 추정을 끈다)
     hookWait: false, // 훅이 알려 준 승인 대기 중
@@ -67,7 +62,7 @@ function newSession(file, agent) {
   };
 }
 
-const HISTORY_MAX = 60, FILES_MAX = 40;
+const HISTORY_MAX = 60;
 function pushLog(s, text, ts = Date.now(), live = true) {
   s.history.push({ t: ts, text });
   if (s.history.length > HISTORY_MAX) s.history.shift();
@@ -76,27 +71,10 @@ function pushLog(s, text, ts = Date.now(), live = true) {
   if (s.log.length > 6) s.log.shift();
 }
 
-function touchFile(s, file, kind, ts) {
-  if (!file || typeof file !== 'string') return;
-  const f = s.files.get(file) || { path: file, edits: 0, reads: 0, t: 0 };
-  if (kind === 'edit') f.edits++; else f.reads++;
-  f.t = Math.max(f.t, ts);
-  s.files.delete(file); s.files.set(file, f); // 최근에 만진 파일이 뒤로
-  if (s.files.size > FILES_MAX) s.files.delete(s.files.keys().next().value);
-}
-
-// 사용자 요청 글: 문자열이거나 text 조각 배열. '<'로 시작하는 조각은 명령·시스템 안내라 뺀다
-function promptText(c) {
+// 사람이 직접 보낸 요청인가 (내용은 쓰지 않고, 타임라인에 "요청 받음"만 남긴다)
+function isPrompt(c) {
   const parts = typeof c === 'string' ? [c] : Array.isArray(c) ? c.filter((x) => x.type === 'text').map((x) => x.text || '') : [];
-  const clean = parts.map((t) => t.trim()).filter((t) => t && !t.startsWith('<') && !t.startsWith('[Request interrupted'))
-    .join(' ').replace(/\s+/g, ' ').trim();
-  return clean.slice(0, 400);
-}
-
-function setPrompt(s, text, ts) {
-  if (!text) return;
-  s.lastPrompt = { text, t: ts };
-  if (!s.firstMessage) s.firstMessage = text;
+  return parts.some((t) => t.trim() && !t.trim().startsWith('<') && !t.trim().startsWith('[Request interrupted'));
 }
 
 function applyEntry(s, e, live) {
@@ -114,16 +92,13 @@ function applyEntry(s, e, live) {
     const uses = content.filter((c) => c.type === 'tool_use');
     const tool = uses[uses.length - 1];
     for (const u of uses) {
-      const kind = classifyTool(u.name), input = u.input || {};
+      const kind = classifyTool(u.name);
       s.byState[kind] = (s.byState[kind] || 0) + 1;
-      const file = input.file_path || input.notebook_path;
-      if (kind === 'typing') touchFile(s, file, 'edit', ts);
-      else if (u.name === 'Read') touchFile(s, file, 'read', ts);
-      if (u !== tool) pushLog(s, describeTool(u.name, input), ts, live); // 한 번에 여러 도구를 부른 경우
+      if (u !== tool) pushLog(s, describeTool(u.name), ts, live); // 한 번에 여러 도구를 부른 경우
     }
     if (tool) {
       s.state = classifyTool(tool.name);
-      s.detail = describeTool(tool.name, tool.input);
+      s.detail = describeTool(tool.name);
       s.tools++;
       pushLog(s, s.detail, ts, live);
     } else if (e.message.stop_reason === 'end_turn') {
@@ -144,11 +119,7 @@ function applyEntry(s, e, live) {
     s.hookWait = false;
     s.state = 'thinking';
     s.detail = isToolResult ? '결과 확인 중…' : '새 요청을 받음';
-    if (!isToolResult && !e.isMeta) {
-      const text = promptText(c);
-      setPrompt(s, text, ts);
-      if (text) pushLog(s, '✉ 사용자 요청', ts, live);
-    }
+    if (!isToolResult && !e.isMeta && isPrompt(c)) pushLog(s, '✉ 사용자 요청', ts, live);
   }
 }
 
@@ -166,11 +137,8 @@ function classifyCodex(name = '', text = '') {
 }
 
 function describeCodex(name, text) {
-  const cmd = (text.match(/"?(?:cmd|command)"?\s*:\s*\[?\s*"([^"]+)/) || [])[1];
   const inner = (text.match(/tools\.(\w+)/) || [])[1];
-  const label = inner || name;
-  const s = cmd ? `${label}: ${cmd}` : label;
-  return s.length > 64 ? s.slice(0, 63) + '…' : s;
+  return toolLabel(inner || name); // 명령어 내용은 보내지 않는다
 }
 
 // "[@Linear](plugin://...)" 같은 플러그인 멘션 마크업을 "@Linear"로 정리
@@ -199,7 +167,6 @@ function codexTitle(s) {
   const id = (path.basename(s.id).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/) || [])[1];
   const name = id && codexNames.get(id);
   if (name) return name;
-  if (s.firstMessage) return s.firstMessage.length > 40 ? s.firstMessage.slice(0, 39) + '…' : s.firstMessage;
   return 'Codex 세션';
 }
 
@@ -223,23 +190,15 @@ function applyCodex(s, e, live) {
     s.state = classifyCodex(name, text);
     s.detail = describeCodex(name, text);
     s.byState[s.state] = (s.byState[s.state] || 0) + 1;
-    // apply_patch 본문의 "*** Update File: 경로" 줄에서 고친 파일을 뽑는다
-    for (const m of text.matchAll(/\*\*\* (?:Add|Update|Delete) File: ([^\n"\\]+)/g)) touchFile(s, path.resolve(s.cwd || '/', m[1].trim()), 'edit', ts);
     pushLog(s, s.detail, ts, live);
   }
   if (e.type === 'response_item' && /call_output$/.test(p.type || '')) {
     s.lastEvent = ts; s.state = 'thinking'; s.detail = '결과 확인 중…';
   }
   if (e.type !== 'event_msg') return;
-  // 첫 메시지가 user_message 대신 item_completed(UserMessage)로만 남는 경우도 있다
-  if (p.type === 'item_completed' && p.item?.type === 'UserMessage' && !s.firstMessage) {
-    const t = (p.item.content || []).map((c) => c.text || '').join(' ');
-    if (t.trim()) s.firstMessage = cleanCodexText(t);
-  }
   switch (p.type) {
     case 'user_message':
       s.lastEvent = ts; s.state = 'thinking'; s.detail = '새 요청을 받음';
-      if (p.message) setPrompt(s, cleanCodexText(p.message).slice(0, 400), ts);
       pushLog(s, '✉ 사용자 요청', ts, live);
       break;
     case 'task_started':
@@ -263,7 +222,6 @@ function applyCodex(s, e, live) {
 }
 
 // 처음 발견한 파일은 끝부분만 읽으므로, 앞부분의 도구 사용 횟수는 따로 세어 둔다 (칭호가 서버 재시작에 흔들리지 않게)
-// 사용자 요청(첫 요청·최근 요청)도 앞부분에 있을 수 있어 함께 줍는다
 const HEAD_COUNT_LIMIT = 64 * 1024 * 1024;
 function countHeadTools(file, end, s) {
   const limit = Math.min(end, HEAD_COUNT_LIMIT);
@@ -272,20 +230,9 @@ function countHeadTools(file, end, s) {
   let pos = 0, rest = '', n = 0;
   const countLine = (line) => {
     if (s.agent === 'codex') {
-      if (line.includes('"user_message"')) {
-        try { const e = JSON.parse(line); if (e.payload?.type === 'user_message' && e.payload.message) setPrompt(s, cleanCodexText(e.payload.message).slice(0, 400), Date.parse(e.timestamp) || 0); } catch { /* 잘린 줄 */ }
-        return;
-      }
       if (!line.includes('_call"')) return;
       try { const e = JSON.parse(line); if (e.type === 'response_item' && /call$/.test(e.payload?.type || '')) n++; } catch { /* 잘린 줄 */ }
     } else {
-      if (line.includes('"type":"user"') && !line.includes('"tool_result"')) {
-        try {
-          const e = JSON.parse(line);
-          if (e.type === 'user' && !e.isMeta && (s.isSub || !e.sessionId || e.sessionId === s.ownId)) setPrompt(s, promptText(e.message?.content), Date.parse(e.timestamp) || 0);
-        } catch { /* 잘린 줄 */ }
-        return;
-      }
       if (!line.includes('"tool_use"')) return;
       try {
         const e = JSON.parse(line);
@@ -368,7 +315,7 @@ function viewOf(s, now = Date.now()) {
   // Claude는 승인 대기가 기록되지 않아 침묵 시간으로 추정(훅을 연결한 세션은 훅이 알려 줌), Codex는 명시적 이벤트 사용
   if (s.agent === 'claude' && !s.hooked && state !== 'idle' && state !== 'thinking' && quiet > 45_000) state = 'waiting';
   if (state === 'thinking' && quiet > 120_000) state = 'idle';
-  return { id: s.id, agent: s.agent, title: s.agent === 'codex' ? codexTitle(s) : s.title, project: s.project, isSub: s.isSub, state, detail: s.detail,
+  return { id: s.publicId, agent: s.agent, title: s.agent === 'codex' ? codexTitle(s) : s.title, project: s.project, isSub: s.isSub, state, detail: s.detail,
     lastEvent: s.lastEvent, tools: s.tools, log: s.log,
     waitExact: state === 'waiting' && (s.agent === 'codex' || s.hookWait), hooked: s.hooked };
 }
@@ -381,17 +328,11 @@ function snapshot() {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-// 상세 패널: 클릭한 세션의 긴 기록. 파일 경로는 작업 폴더 기준 상대 경로(밖이면 ~로 줄임)로 보낸다
-function shortPath(s, file) {
-  if (s.cwd && file.startsWith(s.cwd.replace(/[\\/]+$/, '') + path.sep)) return path.relative(s.cwd, file);
-  const home = os.homedir();
-  return file.startsWith(home + path.sep) ? '~' + file.slice(home.length) : file;
-}
+// 상세 패널: 클릭한 세션의 긴 기록 (도구 이름·시각·횟수만)
 function detailOf(s) {
-  return { ...viewOf(s), startedAt: s.startedAt, firstMessage: s.firstMessage, lastPrompt: s.lastPrompt, byState: s.byState,
-    files: [...s.files.values()].reverse().map((f) => ({ ...f, path: shortPath(s, f.path) })),
-    history: s.history.slice().reverse() };
+  return { ...viewOf(s), startedAt: s.startedAt, byState: s.byState, history: s.history.slice().reverse() };
 }
+const sessionByPublicId = (id) => [...sessions.values()].find((s) => s.publicId === id);
 
 // ---------- 일일 통계 ----------
 const { createStats } = require(path.join(__dirname, 'stats.js'));
@@ -445,9 +386,9 @@ function applyHook(h) {
   s.hooked = true;
   const now = Date.now(), ev = String(h.hook_event_name || '');
   if (isPermissionEvent(h)) {
-    const tool = typeof h.tool_name === 'string' ? h.tool_name.replace(/^mcp__.+?__/, '') : '';
-    const msg = String(h.message || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const text = msg || (tool ? `${tool} 승인 요청` : '사용자 승인 대기 중');
+    // 알림 문구에는 작업 내용이 섞일 수 있어 쓰지 않고, 도구 이름만 뽑는다
+    const tool = toolLabel(typeof h.tool_name === 'string' ? h.tool_name : (String(h.message || '').match(/permission to use (\S+)/i) || [])[1] || '');
+    const text = tool ? `${tool} 승인 요청` : '사용자 승인 대기 중';
     if (!s.hookWait) pushLog(s, `❗ ${text}`, now, true);
     s.hookWait = true; s.waitDetail = text;
     s.state = 'waiting'; s.detail = text; s.lastEvent = now;
@@ -745,7 +686,7 @@ io.on('connection', (socket) => {
   // 상세 패널: 클릭한 에이전트의 긴 기록을 요청할 때만 보낸다
   socket.on('agentDetail', (id, ack) => {
     if (typeof ack !== 'function') return;
-    const s = typeof id === 'string' && sessions.get(id);
+    const s = typeof id === 'string' && sessionByPublicId(id);
     ack(s && s.lastEvent ? detailOf(s) : null);
   });
 
